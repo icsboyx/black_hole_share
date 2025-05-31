@@ -19,8 +19,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReadDirStream;
 use ws::ws_server;
 
-pub static SSL_KEY: &str = "./crt/192.168.1.46.pem";
-pub static SSL_CRT: &str = "./crt/192.168.1.46.crt";
+pub static SSL_KEY: &str = "./crt/server.pem";
+pub static SSL_CRT: &str = "./crt/server.crt";
 pub static BIND_IP: &str = "0.0.0.0";
 pub static WS_BIND_PORT: u16 = 54321;
 
