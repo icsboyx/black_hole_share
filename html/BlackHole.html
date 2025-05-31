@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Unified Upload & Paste</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body class="dark">
+  <div class="toggle-theme" onclick="toggleTheme()">🌙</div>
+  <h1>Upload or Paste</h1>
+
+  <div id="drop-area" tabindex="0">
+    Click, upload, paste or drop image or text here
+    <input type="file" id="fileInput" class="hidden" accept="image/*" />
+  </div>
+
+  <div id="status"></div>
+  <div id="info"></div>
+  <a id="preview-link" href="#" class="hidden">
+    <img id="preview" class="hidden" />
+  </a>
+  <textarea id="text-content" class="hidden" rows="10" cols="50" readonly></textarea>
+
+  <div>
+    <button id="copy-link" class="hidden">📋 Copy Link</button>
+    <button id="reset" class="hidden">🔄 Reset</button>
+  </div>
+  <div id="debug" class="debug"></div>
+
+  <script>
+    const dropArea = document.getElementById('drop-area');
+    const fileInput = document.getElementById('fileInput');
+    const preview = document.getElementById('preview');
+    const textArea = document.getElementById('text-content');
+    const status = document.getElementById('status');
+    const copyBtn = document.getElementById('copy-link');
+    const resetBtn = document.getElementById('reset');
+    const debugArea = document.getElementById('debug');
+    const previewLink = document.getElementById('preview-link');
+
+    let assetUri = '';
+    // WebSocket setup
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsHost = window.location.hostname;
+    const wsPort = 54321;
+    const ws = new WebSocket(`${wsProtocol}//${wsHost}:${wsPort}`);
+    // const ws = new WebSocket(`https://f2fa-93-46-106-3.ngrok-free.app`);
+    console.log(ws);
+
+    ws.onopen = () => status.textContent = '✅ Connected to server.';
+    ws.onerror = () => status.textContent = '❌ WebSocket error.';
+    ws.onclose = () => status.textContent = '⚠️ WebSocket closed.';
+
+    ws.onmessage = (event) => {
+      logDebug("Received: " + event.data);
+      try {
+        const res = JSON.parse(event.data);
+        if (res.status === "OK") {
+          assetUri = res.uri;
+          assetLink = `${window.location.protocol}//${window.location.hostname}/${assetUri}`;
+          previewLink.href = assetLink;
+          dropArea.classList.add('hidden');
+          copyBtn.classList.remove('hidden');
+          resetBtn.classList.remove('hidden');
+          status.textContent = '✅ Upload successful.';
+        }
+      } catch (err) {
+        console.error("Invalid server response:", err);
+      }
+
+    };
+
+    // Enable file input on click
+    dropArea.addEventListener('click', () => {
+      if (dropArea.style.pointerEvents !== 'none') fileInput.click();
+    });
+
+    dropArea.addEventListener('dragover', e => e.preventDefault());
+    dropArea.addEventListener('drop', e => {
+      e.preventDefault();
+      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+    });
+
+    dropArea.addEventListener('paste', e => {
+      e.preventDefault();
+      const items = e.clipboardData.items;
+      let found = false;
+
+      for (const item of items) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) {
+            handleFile(file);
+            found = true;
+            break;
+          }
+        } else if (item.kind === "string" && item.type === "text/plain") {
+          item.getAsString(text => handleText(text));
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        status.textContent = '⚠️ Unsupported content on paste.';
+      }
+    });
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files[0]) handleFile(fileInput.files[0]);
+    });
+
+
+    function logDebug(message) {
+      const line = document.createElement('div');
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      debugArea.appendChild(line);
+      debugArea.scrollTop = debugArea.scrollHeight;
+    }
+
+    function handleFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result;
+        preview.src = base64;
+        previewLink.classList.remove('hidden');
+        preview.classList.remove('hidden');
+        textArea.classList.add('hidden');
+        disableDropArea();
+        status.textContent = '📤 Sending image...';
+        ws.send(JSON.stringify({
+          type: "image",
+          mime: file.type,
+          data: base64
+        }));
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function handleText(text) {
+      textArea.value = text;
+      textArea.classList.remove('hidden');
+      preview.classList.add('hidden');
+      disableDropArea();
+      status.textContent = '📤 Sending text...';
+      ws.send(JSON.stringify({
+        type: "text",
+        mime: "text/plain",  // standard mime for text
+        data: btoa(unescape(encodeURIComponent(text)))
+      }));
+    }
+
+    function disableDropArea() {
+      dropArea.style.pointerEvents = 'none';
+      dropArea.style.opacity = 0.6;
+    }
+
+    function enableDropArea() {
+      dropArea.style.pointerEvents = 'auto';
+      dropArea.style.opacity = 1;
+    }
+
+    copyBtn.onclick = () => {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(assetLink);
+        status.textContent = '🔗 Link copied to clipboard.';
+      }
+    };
+
+    resetBtn.onclick = () => {
+      preview.src = '';
+      preview.classList.add('hidden');
+      textArea.value = '';
+      textArea.classList.add('hidden');
+      fileInput.value = '';
+      assetUri = '';
+      status.textContent = '';
+      debugArea.innerHTML = '';
+      copyBtn.classList.add('hidden');
+      resetBtn.classList.add('hidden');
+      dropArea.classList.remove('hidden');
+      enableDropArea();
+    };
+
+    function toggleTheme() {
+      document.body.classList.toggle('light');
+      document.querySelector('.toggle-theme').textContent =
+        document.body.classList.contains('light') ? '☀️' : '🌙';
+    }
+
+    // dropArea.addEventListener('keydown', e => {
+    //   if (e.key === 'Enter' || e.key === ' ') {
+    //     fileInput.click();
+    //   }
+    // });
+
+    // Start in dark mode visually but ensure state is correct
+    window.addEventListener('DOMContentLoaded', () => {
+      dropArea.focus();
+      if (!document.body.classList.contains('dark')) {
+        toggleTheme(); // ensures the theme matches icon
+      }
+    });
+
+  </script>
+</body>
+
+</html>

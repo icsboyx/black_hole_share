@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Zoomable Image</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #121212;
+      color: #fff;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h1 {
+      margin: 1rem 0;
+    }
+
+    .image-wrapper {
+      flex: 1;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      overflow: auto;
+      width: 100%;
+      max-height: 100%;
+    }
+
+    #preview {
+      cursor: zoom-in;
+      max-width: none;
+      height: auto;
+      display: block;
+      transition: all 0.3s ease;
+    }
+
+    #preview.zoomed {
+      cursor: zoom-out;
+    }
+  </style>
+</head>
+<body>
+  <h1>Zoomable Image</h1>
+  <div class="image-wrapper" id="imageWrapper">
+        <img id="preview" src="data:image/png;base64,{{ base64_image }}" alt="Zoomable image" />
+  </div>
+
+  <script>
+    const img = document.getElementById('preview');
+    const wrapper = document.getElementById('imageWrapper');
+    const MAX_HEIGHT = 600;
+    let zoomed = false;
+    let naturalWidth, naturalHeight, scaleFactor;
+
+    img.addEventListener('load', () => {
+      naturalWidth = img.naturalWidth;
+      naturalHeight = img.naturalHeight;
+
+      if (naturalHeight > MAX_HEIGHT) {
+        scaleFactor = MAX_HEIGHT / naturalHeight;
+        img.style.height = MAX_HEIGHT + 'px';
+        img.style.width = (naturalWidth * scaleFactor) + 'px';
+      } else {
+        scaleFactor = 1;
+        img.style.height = naturalHeight + 'px';
+        img.style.width = naturalWidth + 'px';
+      }
+    });
+
+    img.addEventListener('click', () => {
+      zoomed = !zoomed;
+
+      if (zoomed) {
+        img.classList.add('zoomed');
+        img.style.height = naturalHeight + 'px';
+        img.style.width = naturalWidth + 'px';
+
+        requestAnimationFrame(() => {
+          wrapper.scrollTop = (img.clientHeight - wrapper.clientHeight) / 2;
+          wrapper.scrollLeft = (img.clientWidth - wrapper.clientWidth) / 2;
+        });
+      } else {
+        img.classList.remove('zoomed');
+
+        if (naturalHeight > MAX_HEIGHT) {
+          scaleFactor = MAX_HEIGHT / naturalHeight;
+          img.style.height = MAX_HEIGHT + 'px';
+          img.style.width = (naturalWidth * scaleFactor) + 'px';
+        } else {
+          img.style.height = naturalHeight + 'px';
+          img.style.width = naturalWidth + 'px';
+        }
+
+        wrapper.scrollTop = 0;
+        wrapper.scrollLeft = 0;
+      }
+    });
+  </script>
+</body>
+</html>
+
+
+
