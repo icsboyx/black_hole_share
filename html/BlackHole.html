@@ -46,7 +46,6 @@
     const wsHost = window.location.hostname;
     const wsPort = 54321;
     const ws = new WebSocket(`${wsProtocol}//${wsHost}:${wsPort}`);
-    // const ws = new WebSocket(`https://f2fa-93-46-106-3.ngrok-free.app`);
     console.log(ws);
 
     ws.onopen = () => status.textContent = '✅ Connected to server.';

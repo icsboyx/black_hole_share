@@ -16,7 +16,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async};
 
 use crate::img_mgt::save_image;
 use crate::text_mgt::save_text;
-use crate::{BIND_IP, WS_BIND_PORT};
+use crate::{BIND_IP, SSL_CRT, SSL_KEY, WS_BIND_PORT};
 
 // Define a new trait that combines the required traits
 pub trait AsyncReadWriteUnpin: AsyncRead + AsyncWrite + Unpin {}
@@ -148,8 +148,8 @@ impl IncomingImageReply {
 pub async fn ws_server() -> anyhow::Result<()> {
     let addr_tls = BIND_IP.to_string() + ":" + WS_BIND_PORT.to_string().as_str();
 
-    let crt_key = PrivateKeyDer::from_pem_file("192.168.1.46.pem").unwrap();
-    let crt = CertificateDer::pem_file_iter("192.168.1.46.crt")
+    let crt_key = PrivateKeyDer::from_pem_file(SSL_KEY).unwrap();
+    let crt = CertificateDer::pem_file_iter(SSL_CRT)
         .unwrap()
         .collect::<Vec<_>>()
         .into_iter()

@@ -19,6 +19,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReadDirStream;
 use ws::ws_server;
 
+pub static SSL_KEY: &str = "./crt/192.168.1.46.pem";
+pub static SSL_CRT: &str = "./crt/192.168.1.46.crt";
 pub static BIND_IP: &str = "0.0.0.0";
 pub static WS_BIND_PORT: u16 = 54321;
 
@@ -90,10 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let rocket_https = rocket::custom(rocket::Config {
         address: BIND_IP.parse::<IpAddr>().unwrap(),
         port: 443,
-        tls: Some(rocket::config::TlsConfig::from_paths(
-            "./crt/192.168.1.46.crt",
-            "./crt/192.168.1.46.pem",
-        )),
+        tls: Some(rocket::config::TlsConfig::from_paths(SSL_CRT, SSL_KEY)),
         ..rocket::Config::default()
     });
 
