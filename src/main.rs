@@ -23,6 +23,8 @@ pub static SSL_KEY: &str = "./crt/server.pem";
 pub static SSL_CRT: &str = "./crt/server.crt";
 pub static BIND_IP: &str = "0.0.0.0";
 pub static WS_BIND_PORT: u16 = 54321;
+pub static WEB_HTTP_PORT: u16 = 80;
+pub static WEB_HTTPS_PORT: u16 = 443;
 
 #[get("/")]
 fn index() -> Redirect {
@@ -79,7 +81,7 @@ async fn display_image(file: PathBuf) -> Result<Template, Status> {
 async fn main() -> anyhow::Result<()> {
     let http_config = rocket::Config {
         address: BIND_IP.parse::<IpAddr>().unwrap(),
-        port: 80,
+        port: WEB_HTTP_PORT,
         ..rocket::Config::default()
     };
 
@@ -91,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     let rocket_https = rocket::custom(rocket::Config {
         address: BIND_IP.parse::<IpAddr>().unwrap(),
-        port: 443,
+        port: WEB_HTTPS_PORT,
         tls: Some(rocket::config::TlsConfig::from_paths(SSL_CRT, SSL_KEY)),
         ..rocket::Config::default()
     });
