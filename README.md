@@ -36,7 +36,7 @@ flowchart LR
     A[Client] --> B[Web UI / API]
     B --> C[Validation + Rate Limit]
     C --> D[In-Memory Asset Store]
-    D --> E[Share Link /bhs/{id}]
+    D --> E["Share Link /bhs/{id}"]
     D --> F[Cleanup Loop]
     B --> G[JSON Log File]
 ```
