@@ -1,6 +1,7 @@
 # Block Diagram
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"lineColor": "#64748b"}}}%%
 flowchart TD
     Client["Browser or API client"]
     Proxy["Reverse proxy (optional)"]
@@ -56,6 +57,23 @@ flowchart TD
 
     Logger --> Counters
     Logger --> LogFiles
+
+    classDef external fill:#e2e8f0,stroke:#475569,stroke-width:2px,color:#0f172a
+    classDef web fill:#ffffff,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+    classDef task fill:#ffffff,stroke:#b45309,stroke-width:2px,color:#0f172a
+    classDef state fill:#ffffff,stroke:#15803d,stroke-width:2px,color:#0f172a
+
+    class Client,Proxy,HtmlFiles,LogFiles external
+    class Headers,Pages,Upload,Content,Stats web
+    class Cleanup task
+    class Store,Limit,Logger,Counters state
+
+    style Process fill:#f1f5f9,stroke:#475569,stroke-width:2px,color:#0f172a
+    style Web fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#0f172a
+    style Background fill:#fef3c7,stroke:#b45309,stroke-width:2px,color:#0f172a
+    style State fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#0f172a
+
+    linkStyle default stroke:#64748b,stroke-width:2px
 ```
 
 - The Actix Web server handles all HTTP traffic, including the pages and the API calls made by their JavaScript.
