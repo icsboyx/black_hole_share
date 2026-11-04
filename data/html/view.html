@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Black Hole Share - View</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css"
+    integrity="sha512-Jk4AqjWsdSzSWCSuQTfYRIF84Rq/eV0G2+tu07byYwHcbTGfdmLrHjUSwvzp5HvbiqK4ibmNwdcG49Y5RGYPTg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer">
+</head>
+
+<body class="view-page">
+  <h1><a href="/" class="home-link">Black Hole Share</a></h1>
+
+  <div class="view-container">
+    <div id="contentArea" class="content-area">
+      <p class="loading">Loading...</p>
+    </div>
+  </div>
+
+  {{FOOTER}}
+
+  <!-- Zoom overlay -->
+  <div id="zoomOverlay" class="zoom-overlay" style="display: none;"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+    integrity="sha512-D9gUyxqja7hBtkWpPWGt9wfbfaMGVt9gnyCvYa+jojwwPHLCzUm5i8rpk7vD7wNee9bA35eYIjobYPaQuKS1MQ=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+    const contentArea = document.getElementById('contentArea');
+    const zoomOverlay = document.getElementById('zoomOverlay');
+
+    // Get asset ID from URL path
+    const pathParts = window.location.pathname.split('/');
+    const assetId = pathParts[pathParts.length - 1];
+
+    function escapeHtml(text) {
+      return text.replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function isCodeLike(text) {
+      const lines = text.split('\n');
+      if (lines.length < 2) {
+        return false;
+      }
+      const indicators = [
+        /;\s*$/,
+        /^\s*(fn|function|class|def|public|private|struct|enum|pub\s+struct)\b/,
+        /^\s*#\[/,
+        /=>|::|#include|import\s+\w+/,
+        /\{|\}|\(|\)|\[|\]/,
+      ];
+      const indicatorHits = indicators.reduce((count, re) => count + (re.test(text) ? 1 : 0), 0);
+      return indicatorHits >= 2;
+    }
+
+    async function loadContent() {
+      try {
+        const response = await fetch(`/api/content/${assetId}`);
+
+        if (!response.ok) {
+          if (response.status === 404) {
+            contentArea.innerHTML = '<p class="error">Content not found or expired</p>';
+          } else {
+            contentArea.innerHTML = '<p class="error">Error loading content</p>';
+          }
+          return;
+        }
+
+        const contentType = response.headers.get('content-type');
+
+        if (contentType.startsWith('image/')) {
+          // Display image
+          const blob = await response.blob();
+          const imageUrl = URL.createObjectURL(blob);
+
+          const img = new Image();
+          img.onload = function () {
+            const maxWidth = 780;
+            const maxHeight = 760;
+            const scale = Math.min(maxWidth / img.width, maxHeight / img.height, 1);
+            const displayHeight = Math.floor(img.height * scale);
+            const displayWidth = Math.floor(img.width * scale);
+
+            contentArea.innerHTML = `<img src="${imageUrl}" alt="Shared Content" 
+              style="width: ${displayWidth}px; height: ${displayHeight}px; object-fit: contain; cursor: zoom-in;">`;
+
+            const displayedImg = contentArea.querySelector('img');
+            displayedImg.addEventListener('click', function (e) {
+              e.stopPropagation();
+              showZoom(imageUrl, false);
+            });
+          };
+          img.src = imageUrl;
+
+        } else if (contentType.startsWith('text/')) {
+          // Display text
+          const text = await response.text();
+          const safeText = escapeHtml(text);
+          const isCode = isCodeLike(text);
+          const textHtml = isCode
+            ? `<pre class="text-content-view code-content"><code>${safeText}</code></pre>`
+            : `<div class="text-content-view">${safeText}</div>`;
+
+          contentArea.innerHTML = textHtml;
+          if (isCode && window.hljs) {
+            contentArea.querySelectorAll('pre code').forEach((block) => {
+              window.hljs.highlightElement(block);
+            });
+          }
+
+          const textContent = contentArea.querySelector('.text-content-view');
+          textContent.addEventListener('click', function (e) {
+            e.stopPropagation();
+            showZoom(text, true, isCode);
+          });
+        } else {
+          contentArea.innerHTML = '<p class="error">Unsupported content type</p>';
+        }
+
+      } catch (error) {
+        console.error('Error loading content:', error);
+        contentArea.innerHTML = '<p class="error">Failed to load content</p>';
+      }
+    }
+
+    function showZoom(content, isText = false, isCode = false) {
+      if (isText) {
+        const safeText = escapeHtml(content);
+        const zoomClass = isCode ? 'zoom-text-content code-content' : 'zoom-text-content';
+        const zoomHtml = isCode
+          ? `<pre class="${zoomClass}"><code>${safeText}</code></pre>`
+          : `<div class="${zoomClass}">${safeText}</div>`;
+        zoomOverlay.innerHTML = zoomHtml;
+        if (isCode && window.hljs) {
+          zoomOverlay.querySelectorAll('pre code').forEach((block) => {
+            window.hljs.highlightElement(block);
+          });
+        }
+      } else {
+        zoomOverlay.innerHTML = `<img id="zoomImage" src="${content}" alt="Zoomed Content" 
+          style="max-width: 95vw; max-height: 95vh; object-fit: contain; box-shadow: 0 0 50px rgba(51, 204, 255, 0.5);">`;
+      }
+      zoomOverlay.style.display = 'flex';
+    }
+
+    function hideZoom() {
+      zoomOverlay.style.display = 'none';
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        hideZoom();
+      }
+    });
+
+    // Load content on page load
+    loadContent();
+  </script>
+</body>
+
+</html>

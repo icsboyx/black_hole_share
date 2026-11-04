@@ -1,0 +1,6 @@
+.cargo/
+.codex/
+/target
+/data/storage/*
+/data/logs/*
+my_docker-compose.yaml

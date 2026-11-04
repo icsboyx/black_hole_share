@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Image Upload</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <meta name="theme-color" content="#000000">
+</head>
+
+<body>
+  <h1><a href="/" class="home-link">Black Hole Share</a></h1>
+
+  <div class="upload-container">
+    <div class="upload-area">
+      <input type="file" id="fileInput" accept="image/*" style="display: none" />
+      <div id="uploadZone" class="upload-zone">
+        <p>Click to select file, paste image, text data, or drag & drop</p>
+      </div>
+    </div>
+  </div>
+  <div id="uploadError" class="upload-error" style="display: none" role="status" aria-live="polite"></div>
+
+  <div class="duration-container">
+    <label for="durationSlider">Duration: <span id="durationValue">5</span> min</label>
+    <input type="range" id="durationSlider" min="1" max="60" value="5" step="1" />
+    <div class="button-row">
+      <button id="resetBtn" class="reset-btn" style="display: none">
+        Reset
+      </button>
+      <button id="uploadBtn" class="upload-btn" style="display: none">
+        Upload
+      </button>
+    </div>
+    <div id="linkContainer" class="link-container" style="display: none">
+      <p>Link:</p>
+      <a id="uploadedLink" href="#" target="_blank"></a>
+      <p id="clipboardMessage" class="clipboard-message" style="display: none"></p>
+    </div>
+  </div>
+
+  <section class="intro-panel" aria-label="Sharing details">
+    <p class="intro-kicker">Temporary by design</p>
+    <p class="intro-copy">
+      Everything shared here is ephemeral. Files and text stay available only for the duration you
+      choose, then they are automatically deleted.
+    </p>
+    <div class="intro-chips" aria-hidden="true">
+      <span class="intro-chip">Selectable TTL: 1-60 min</span>
+      <span class="intro-chip">Auto-delete after expiry</span>
+      <span class="intro-chip">In-memory only</span>
+    </div>
+  </section>
+
+  {{FOOTER}}
+
+  <!-- Zoom overlay -->
+  <div id="zoomOverlay" class="zoom-overlay" style="display: none"></div>
+
+  <script>
+    let currentContentData = null;
+    let currentContentType = null;
+    let currentContentIsText = false;
+    let uploadCompleted = false;
+    const fileInput = document.getElementById("fileInput");
+    const uploadZone = document.getElementById("uploadZone");
+    const uploadContainer = document.querySelector(".upload-container");
+    const durationContainer = document.querySelector(".duration-container");
+    const durationSlider = document.getElementById("durationSlider");
+    const durationValue = document.getElementById("durationValue");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const zoomOverlay = document.getElementById("zoomOverlay");
+    const linkContainer = document.getElementById("linkContainer");
+    const uploadedLink = document.getElementById("uploadedLink");
+    const clipboardMessage = document.getElementById("clipboardMessage");
+    const uploadError = document.getElementById("uploadError");
+
+    function formatRetryAfter(seconds) {
+      const safeSeconds = Math.max(0, Math.floor(seconds));
+      const minutes = Math.floor(safeSeconds / 60);
+      const remainder = safeSeconds % 60;
+      if (minutes > 0) {
+        return `${minutes}m ${remainder}s`;
+      }
+      return `${remainder}s`;
+    }
+
+    // Update duration display
+    durationSlider.addEventListener("input", function () {
+      durationValue.textContent = this.value;
+    });
+
+    function stepDuration(deltaY) {
+      const direction = deltaY < 0 ? -1 : 1;
+      const nextValue = Math.min(
+        Number(durationSlider.max),
+        Math.max(Number(durationSlider.min), durationSlider.valueAsNumber + direction)
+      );
+      durationSlider.valueAsNumber = nextValue;
+      durationValue.textContent = durationSlider.value;
+    }
+
+    // Allow wheel control anywhere inside the duration box, not only on the slider track.
+    durationContainer.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      stepDuration(e.deltaY);
+    }, { passive: false });
+
+    uploadBtn.addEventListener("click", async () => {
+      const duration = durationSlider.value;
+      const mimeType = currentContentType || (currentContentIsText ? "text/plain" : "image/png");
+      const contentData = currentContentData;
+
+      if (!contentData) {
+        console.log("❌ No content to upload!");
+        return;
+      }
+
+      sendUpload(duration, mimeType, contentData);
+    });
+
+    async function sendUpload(duration, mimeType, contentData) {
+      const isText = mimeType === "text/plain";
+      let content = contentData;
+
+      // For images, remove data URL prefix to send only base64 string
+      if (!isText && contentData.includes("base64,")) {
+        content = contentData.split("base64,")[1];
+      }
+
+      const payload = {
+        duration: parseInt(duration),
+        content_type: mimeType,
+        content: content,
+      };
+
+      try {
+        uploadError.style.display = "none";
+        uploadError.textContent = "";
+        const response = await fetch("/api/upload", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        let result = null;
+        try {
+          result = await response.json();
+        } catch (parseError) {
+          result = null;
+        }
+
+        if (!response.ok) {
+          const retryAfterSeconds = result && Number.isFinite(Number(result.retry_after_seconds))
+            ? Number(result.retry_after_seconds)
+            : null;
+          let errorMessage =
+            (result && result.error) ||
+            `Upload failed (${response.status})`;
+          if (retryAfterSeconds !== null) {
+            errorMessage += ` Try again in ${formatRetryAfter(retryAfterSeconds)}.`;
+          }
+          uploadError.textContent = errorMessage;
+          uploadError.style.display = "block";
+          return;
+        }
+
+        if (!result || !result.link) {
+          uploadError.textContent = "Upload failed (invalid response)";
+          uploadError.style.display = "block";
+          return;
+        }
+
+        // Mark upload as completed to prevent further pastes
+        uploadCompleted = true;
+
+        // Hide duration controls and buttons
+        document.querySelector('label[for="durationSlider"]').style.display =
+          "none";
+        durationSlider.style.display = "none";
+        uploadBtn.style.display = "none";
+        resetBtn.style.display = "none";
+
+        // Show link
+        const fullLink = window.location.origin + result.link;
+        uploadedLink.href = fullLink;
+        uploadedLink.textContent = fullLink;
+        linkContainer.style.display = "block";
+
+        // Copy to clipboard
+        try {
+          await navigator.clipboard.writeText(fullLink);
+          clipboardMessage.textContent = "✓ Copied to clipboard!";
+          clipboardMessage.style.color = "var(--accent-green)";
+          clipboardMessage.style.cursor = "default";
+          clipboardMessage.style.display = "block";
+          clipboardMessage.onclick = null;
+        } catch (error) {
+          clipboardMessage.textContent = "⚠ Click here to copy link";
+          clipboardMessage.style.color = "var(--accent-cyan)";
+          clipboardMessage.style.cursor = "pointer";
+          clipboardMessage.style.display = "block";
+          clipboardMessage.onclick = function () {
+            const textArea = document.createElement("textarea");
+            textArea.value = fullLink;
+            textArea.style.position = "fixed";
+            textArea.style.left = "-999999px";
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+              document.execCommand("copy");
+              clipboardMessage.textContent = "✓ Copied to clipboard!";
+              clipboardMessage.style.color = "var(--accent-green)";
+              clipboardMessage.style.cursor = "default";
+              clipboardMessage.onclick = null;
+            } catch (e) {
+              clipboardMessage.textContent = "✗ Copy failed";
+              clipboardMessage.style.color = "#ff6666";
+            }
+            document.body.removeChild(textArea);
+          };
+        }
+      } catch (error) {
+        uploadError.textContent = `Upload failed (${error.message})`;
+        uploadError.style.display = "block";
+      }
+    }
+
+    // Reset to initial state
+    resetBtn.addEventListener("click", function () {
+      currentContentData = null;
+      currentContentType = null;
+      currentContentIsText = false;
+      uploadCompleted = false;
+      uploadZone.innerHTML =
+        "<p>Click to select file, paste image data, or drag & drop</p>";
+      uploadContainer.style.height = "180px";
+      uploadContainer.style.pointerEvents = "";
+      uploadContainer.style.overflow = "";
+      uploadZone.style.pointerEvents = "";
+      uploadZone.style.alignItems = "";
+      uploadZone.style.justifyContent = "";
+      uploadZone.style.padding = "";
+      fileInput.value = "";
+      durationSlider.value = "5";
+      durationValue.textContent = "5";
+      document.querySelector('label[for="durationSlider"]').style.display =
+        "";
+      durationSlider.style.display = "";
+      uploadBtn.style.display = "none";
+      resetBtn.style.display = "none";
+      linkContainer.style.display = "none";
+      clipboardMessage.style.display = "none";
+      uploadError.style.display = "none";
+      uploadError.textContent = "";
+      uploadZone.focus();
+    });
+
+    // Display and scale image or text content maintaining aspect ratio
+    function displayContent(content, isText = false, contentType = null) {
+      currentContentData = content;
+      currentContentIsText = isText;
+      currentContentType = contentType || (isText ? "text/plain" : getDataUrlMimeType(content));
+
+      if (isText) {
+        // Display text content - ZOOM ENABLED
+        uploadZone.innerHTML = `<div class="text-content" style="cursor: zoom-in;">${content
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")}</div>`;
+        uploadContainer.style.height = "500px";
+        uploadContainer.style.overflow = "hidden";
+        uploadZone.style.pointerEvents = "auto";
+        uploadZone.style.alignItems = "stretch";
+        uploadZone.style.justifyContent = "stretch";
+        uploadZone.style.padding = "0";
+        uploadBtn.style.display = "block";
+        resetBtn.style.display = "block";
+
+        // ZOOM FOR TEXT
+        const textContent = uploadZone.querySelector(".text-content");
+        textContent.addEventListener("click", function (e) {
+          e.stopPropagation();
+          showZoom(content, true);
+        });
+      } else {
+        // Display image
+        const img = new Image();
+        img.onload = function () {
+          const maxWidth = 620;
+          const maxHeight = 800;
+          const scale = Math.min(
+            maxWidth / img.width,
+            maxHeight / img.height,
+            1
+          );
+          const displayHeight = Math.floor(img.height * scale);
+          const displayWidth = Math.floor(img.width * scale);
+
+          uploadZone.innerHTML = `<img src="${content}" alt="Uploaded Image" style="width: ${displayWidth}px; height: ${displayHeight}px; object-fit: contain; cursor: zoom-in;">`;
+          uploadContainer.style.height = `${displayHeight + 20}px`;
+          uploadContainer.style.pointerEvents = "none";
+          uploadZone.style.pointerEvents = "auto";
+          uploadBtn.style.display = "block";
+          resetBtn.style.display = "block";
+
+          const uploadedImg = uploadZone.querySelector("img");
+          uploadedImg.addEventListener("click", function (e) {
+            e.stopPropagation();
+            showZoom(content, false);
+          });
+        };
+        img.onerror = function () {
+          uploadError.textContent = "Unable to read pasted image data";
+          uploadError.style.display = "block";
+          currentContentData = null;
+          currentContentType = null;
+          currentContentIsText = false;
+        };
+        img.src = content;
+      }
+    }
+
+    function getDataUrlMimeType(content) {
+      const match = typeof content === "string" && content.match(/^data:([^;,]+)[;,]/);
+      return match ? match[1] : "image/png";
+    }
+
+    function displayImageFile(file) {
+      if (!file || !file.type.startsWith("image/")) {
+        uploadError.textContent = "Only image files can be uploaded here";
+        uploadError.style.display = "block";
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function (event) {
+        displayContent(event.target.result, false, file.type);
+      };
+      reader.onerror = function () {
+        uploadError.textContent = "Unable to read image file";
+        uploadError.style.display = "block";
+      };
+      reader.readAsDataURL(file);
+    }
+
+    // Open file picker on container click (ONLY IF EMPTY)
+    uploadContainer.addEventListener("click", function (e) {
+      if (
+        !uploadCompleted &&
+        uploadContainer.style.pointerEvents !== "none" &&
+        !uploadZone.querySelector(".text-content") &&
+        !uploadZone.querySelector("img")
+      ) {
+        fileInput.click();
+      }
+    });
+
+    fileInput.addEventListener("change", function (e) {
+      if (uploadCompleted) return;
+      const file = e.target.files[0];
+      if (file) displayImageFile(file);
+    });
+
+    // Handle paste from clipboard
+    uploadZone.addEventListener("paste", function (e) {
+      if (uploadCompleted) {
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      const files = e.clipboardData.files;
+      for (let file of files) {
+        if (file.type.startsWith("image/")) {
+          displayImageFile(file);
+          return;
+        }
+      }
+
+      const items = e.clipboardData.items;
+
+      for (let item of items) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          displayImageFile(file);
+          return;
+        }
+      }
+
+      const text = e.clipboardData.getData("text");
+      if (text) {
+        displayContent(text, true);
+      } else {
+        uploadError.textContent = "Clipboard does not contain a readable image or text";
+        uploadError.style.display = "block";
+      }
+    });
+
+    // Handle drag and drop
+    uploadZone.addEventListener("drop", handleDrop);
+    uploadContainer.addEventListener("drop", handleDrop);
+
+    function handleDrop(e) {
+      e.preventDefault();
+      if (uploadCompleted) return;
+      const file = e.dataTransfer.files[0];
+      if (file) displayImageFile(file);
+    }
+
+    uploadZone.addEventListener("dragover", function (e) {
+      e.preventDefault();
+      uploadZone.style.borderColor = "var(--border-hover)";
+    });
+
+    uploadZone.addEventListener("dragleave", function (e) {
+      uploadZone.style.borderColor = "";
+    });
+
+    uploadContainer.addEventListener("dragover", function (e) {
+      e.preventDefault();
+    });
+
+    uploadZone.setAttribute("tabindex", "0");
+
+    window.addEventListener("focus", function () {
+      uploadZone.focus();
+    });
+
+    uploadZone.focus();
+
+    // Improved zoom overlay functions
+    function showZoom(content, isText = false) {
+      if (isText) {
+        zoomOverlay.innerHTML = `
+          <div class="zoom-text-content">${content
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")}</div>
+        `;
+      } else {
+        zoomOverlay.innerHTML = `<img id="zoomImage" src="${content}" alt="Zoomed Image" style="max-width: 95vw; max-height: 95vh; object-fit: contain; box-shadow: 0 0 50px rgba(51, 204, 255, 0.5);">`;
+      }
+      zoomOverlay.style.display = "flex";
+    }
+
+    function hideZoom() {
+      zoomOverlay.style.display = "none";
+    }
+
+    zoomOverlay.addEventListener("click", hideZoom);
+
+    // ESC TO EXIT ZOOM
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" || e.key === "Esc") {
+        hideZoom();
+      }
+    });
+
+    function canTriggerUpload() {
+      return (
+        currentContentData &&
+        window.getComputedStyle(uploadBtn).display !== "none" &&
+        zoomOverlay.style.display !== "flex"
+      );
+    }
+
+    // ENTER TO UPLOAD (when content is ready)
+    document.addEventListener(
+      "keydown",
+      function (e) {
+        if ((e.key === "Enter" || e.code === "NumpadEnter") && canTriggerUpload()) {
+          e.preventDefault();
+          uploadBtn.click();
+        }
+      },
+      true
+    );
+
+    window.addEventListener("resize", function () {
+      if (currentContentData) {
+        displayContent(currentContentData, currentContentIsText, currentContentType);
+      }
+    });
+  </script>
+</body>
+
+</html>

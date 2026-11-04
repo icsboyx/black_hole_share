@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Black Hole Share - Statistics</title>
+  <link rel="stylesheet" href="/style.css" />
+  <style>
+    .stats-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(140px, 170px);
+      gap: 20px;
+      margin-top: 20px;
+      align-items: stretch;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(160px, 1fr));
+      gap: 20px;
+    }
+
+    .stats-request-card {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .stat-card {
+      background-color: var(--bg-secondary);
+      border: 2px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .stat-card:hover {
+      border-color: var(--border-hover);
+      box-shadow: 0 4px 15px rgba(0, 255, 153, 0.2);
+    }
+
+    .stat-value {
+      font-size: 1.5em;
+      font-weight: bold;
+      color: var(--accent-cyan);
+      margin: 10px 0;
+    }
+
+    .stat-label {
+      color: var(--text-secondary);
+      font-size: 0.9em;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .stat-card.highlight .stat-value {
+      color: var(--accent-green);
+    }
+
+    .recent-activity {
+      margin-top: 30px;
+      background-color: var(--bg-secondary);
+      border: 2px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      transition: all 0.3s ease;
+    }
+
+    .recent-activity h2 {
+      color: var(--accent-cyan);
+      margin: 0 0 15px 0;
+      font-size: 1.2em;
+    }
+
+    .recent-activity:hover {
+      border-color: var(--border-hover);
+      box-shadow: 0 4px 15px rgba(0, 255, 153, 0.2);
+    }
+
+    .activity-list {
+      max-height: 260px;
+      overflow-y: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85em;
+    }
+
+    .activity-item {
+      padding: 8px 0;
+      border-bottom: 1px solid var(--inactive-gray);
+      display: grid;
+      grid-template-columns: 90px minmax(120px, 1fr) minmax(90px, 1fr) minmax(180px, 1fr);
+      align-items: center;
+      gap: 10px;
+      white-space: nowrap;
+    }
+
+    .activity-item:last-child {
+      border-bottom: none;
+    }
+
+    .activity-action {
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 0.8em;
+      font-weight: bold;
+    }
+
+    .activity-action.upload {
+      background-color: rgba(0, 255, 153, 0.2);
+      color: var(--accent-green);
+    }
+
+    .activity-action.delete {
+      background-color: rgba(255, 102, 102, 0.2);
+      color: #ff6666;
+    }
+
+    .activity-time {
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .activity-details {
+      color: var(--text-primary);
+      display: contents;
+    }
+
+    .activity-mime {
+      text-align: left;
+    }
+
+    .activity-duration {
+      text-align: left;
+    }
+
+    .activity-time {
+      text-align: left;
+    }
+
+    .refresh-btn {
+      background-color: var(--border-color);
+      color: var(--bg-tertiary);
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      margin-top: 20px;
+      transition: all 0.2s ease;
+    }
+
+    .refresh-btn:hover {
+      background-color: var(--border-hover);
+    }
+
+    .loading {
+      text-align: center;
+      color: var(--text-secondary);
+      padding: 40px;
+    }
+  </style>
+</head>
+
+<body class="view-page">
+  <h1><a href="/" class="home-link">Black Hole Share</a> - Statistics</h1>
+
+  <div id="statsContent" class="loading">
+    <p>Loading statistics...</p>
+  </div>
+
+  {{FOOTER}}
+
+  <script>
+    async function loadStats() {
+      try {
+        const response = await fetch("/api/stats");
+        if (!response.ok) {
+          throw new Error("Failed to load stats");
+        }
+        const stats = await response.json();
+        renderStats(stats);
+      } catch (error) {
+        document.getElementById("statsContent").innerHTML = `
+          <p class="error">Failed to load statistics: ${error.message}</p>
+        `;
+      }
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    function formatTime(timestamp) {
+      const date = new Date(timestamp);
+      return date.toLocaleString("en-GB", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+    }
+
+    function renderStats(stats) {
+      const html = `
+        <div class="stats-layout">
+          <div class="stats-grid">
+            <div class="stat-card highlight">
+              <div class="stat-label">Active Assets</div>
+              <div class="stat-value">${stats.active_assets}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Total Uploads</div>
+              <div class="stat-value">${stats.total_uploads}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Total Deleted</div>
+              <div class="stat-value">${stats.total_deleted}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Storage Used</div>
+              <div class="stat-value">${formatBytes(stats.storage_bytes)}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Images</div>
+              <div class="stat-value">${stats.image_count}</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Text</div>
+              <div class="stat-value">${stats.text_count}</div>
+            </div>
+          </div>
+
+          <div class="stat-card stats-request-card">
+            <div class="stat-label">Total Server Requests</div>
+            <div class="stat-value">${stats.total_requests}</div>
+          </div>
+        </div>
+
+        <div class="recent-activity">
+          <h2>Recent Activity</h2>
+          <div class="activity-list">
+            ${stats.recent_activity.length === 0
+          ? '<p style="color: var(--text-secondary);">No recent activity</p>'
+          : stats.recent_activity
+            .map(
+              (item) => `
+              <div class="activity-item">
+                <span class="activity-action ${escapeHtml(item.action)}">${escapeHtml(item.action)}</span>
+                <span class="activity-details">
+                  <span class="activity-mime">${escapeHtml(item.mime)}</span>
+                  <span class="activity-duration">${item.share_duration} min</span>
+                </span>
+                <span class="activity-time">${formatTime(item.timestamp)}</span>
+              </div>
+            `
+            )
+            .join("")
+        }
+          </div>
+        </div>
+
+        <button class="refresh-btn" onclick="loadStats()">Refresh</button>
+      `;
+      document.getElementById("statsContent").innerHTML = html;
+    }
+
+    loadStats();
+    // Auto-refresh every 30 seconds
+    setInterval(loadStats, 30000);
+  </script>
+</body>
+
+</html>
