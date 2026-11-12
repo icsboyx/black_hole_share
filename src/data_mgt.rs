@@ -4,17 +4,18 @@ use std::{collections::HashMap, fmt::Debug};
 use actix_web::web::Bytes;
 use anyhow::Result;
 use chrono::{Duration, Utc};
-use futures::lock::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 
-use crate::{MAX_ASSETS, MAX_TOTAL_STORAGE_BYTES};
 use crate::logs::LogFile;
+use crate::{MAX_ASSETS, MAX_TOTAL_STORAGE_BYTES};
 use crate::{MAX_UPLOADS_PER_USER, logs::LogEventType};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Asset {
-    id: String,
+    id: Uuid,
     share_duration: u32,
     created_at: i64,
     expires_at: i64,
@@ -32,7 +33,7 @@ impl Asset {
         content: Vec<u8>,
         uploader_ip: Option<String>,
     ) -> Self {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = uuid::Uuid::new_v4();
         let created_at = Utc::now().timestamp_millis();
         let expires_at = created_at + Duration::minutes(share_duration as i64).num_milliseconds();
         Asset {
@@ -49,8 +50,8 @@ impl Asset {
         Utc::now().timestamp_millis() > self.expires_at
     }
 
-    pub fn id(&self) -> String {
-        self.id.clone()
+    pub fn id(&self) -> Uuid {
+        self.id
     }
 
     pub fn mime(&self) -> String {
@@ -191,11 +192,11 @@ impl AssetStorage {
         }
     }
 
-    pub async fn get_asset(&self, id: &str) -> Option<Asset> {
+    pub async fn get_asset(&self, id: &Uuid) -> Option<Asset> {
         let assets = self.assets.lock().await;
         assets
             .iter()
-            .find(|asset| asset.id == id && !asset.is_expired())
+            .find(|asset| asset.id == *id && !asset.is_expired())
             .cloned()
     }
 

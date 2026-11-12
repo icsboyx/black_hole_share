@@ -131,7 +131,11 @@ async fn api_get_asset(
         .write_event(LogEventType::HttpRequest(req.into()))
         .await
         .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
-    match app_state.assets.get_asset(&path.into_inner()).await {
+
+    let uuid = uuid::Uuid::parse_str(&path.into_inner())
+        .map_err(|_| actix_web::error::ErrorBadRequest("Invalid format"))?;
+
+    match app_state.assets.get_asset(&uuid).await {
         None => Ok(HttpResponse::NotFound().body("Asset not found")),
         Some(asset) => Ok(HttpResponse::Ok()
             .content_type(asset.mime())

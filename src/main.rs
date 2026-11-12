@@ -33,8 +33,9 @@ pub static MAX_ASSETS: usize = 1000;
 pub static MAX_ASSET_SIZE_BYTES: usize = 3 * 1024 * 1024; // 3 MB
 pub static MAX_TOTAL_STORAGE_BYTES: usize = 512 * 1024 * 1024; // 512 MB across all assets
 pub static MAX_UPLOADS_PER_USER: usize = 10;
+
 // SVG and HTML are excluded on purpose: both can run scripts when opened directly.
-pub static ALLOWED_CONTENT_TYPES: [&str; 7] = [
+pub static ALLOWED_CONTENT_TYPES: &[&str] = &[
     "text/plain",
     "image/png",
     "image/jpeg",
@@ -43,16 +44,20 @@ pub static ALLOWED_CONTENT_TYPES: [&str; 7] = [
     "image/avif",
     "image/bmp",
 ];
+
 // Uploaded content is never a page: block scripts even if a browser tries to render it.
 pub static CONTENT_CSP: &str = "default-src 'none'; sandbox";
+
 // 'unsafe-inline' is required by the inline scripts and styles in data/html/.
 pub static PAGE_CSP: &str = "default-src 'self'; \
     script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; \
     style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; \
     img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; \
     frame-ancestors 'none'; form-action 'self'";
-pub static FOOTER_HTML: LazyLock<String> =
-    LazyLock::new(|| fs::read_to_string(Path::new(HTML_DIR).join("footer.html")).unwrap_or_default());
+pub static FOOTER_HTML: LazyLock<String> = LazyLock::new(|| {
+    fs::read_to_string(Path::new(HTML_DIR).join("footer.html")).unwrap_or_default()
+});
+
 pub static HTML_VARS: LazyLock<Vec<(&str, &str)>> = LazyLock::new(|| {
     vec![
         ("{{FOOTER}}", (*FOOTER_HTML).as_str()),
@@ -82,14 +87,17 @@ pub static BIND_PORT: LazyLock<u16> = LazyLock::new(|| match env::var("BIND_PORT
 });
 
 // Comma-separated proxy IPs allowed to report the client address via X-Forwarded-For.
-pub static TRUSTED_PROXIES: LazyLock<Vec<IpAddr>> = LazyLock::new(|| {
-    parse_trusted_proxies(&env::var("TRUSTED_PROXIES").unwrap_or_default())
-});
+pub static TRUSTED_PROXIES: LazyLock<Vec<IpAddr>> =
+    LazyLock::new(|| parse_trusted_proxies(&env::var("TRUSTED_PROXIES").unwrap_or_default()));
 
 pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
     fs::read_dir(HTML_DIR)
         .unwrap()
-        .filter_map(|entry| entry.ok().and_then(|e| e.file_name().to_str().map(|s| s.to_string())))
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .and_then(|e| e.file_name().to_str().map(|s| s.to_string()))
+        })
         .collect()
 });
 
@@ -100,7 +108,10 @@ use crate::{
 };
 
 #[get("/")]
-async fn index(req: HttpRequest, app_state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
+async fn index(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
     let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "index.html");
     app_state
         .log_file
@@ -111,7 +122,10 @@ async fn index(req: HttpRequest, app_state: web::Data<AppState>) -> actix_web::R
 }
 
 #[get("/stats")]
-async fn stats(req: HttpRequest, app_state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
+async fn stats(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
     let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "stats.html");
     app_state
         .log_file
@@ -122,7 +136,10 @@ async fn stats(req: HttpRequest, app_state: web::Data<AppState>) -> actix_web::R
 }
 
 #[get("/bhs/{id}")]
-async fn view_asset(req: HttpRequest, app_state: web::Data<AppState>) -> actix_web::Result<HttpResponse> {
+async fn view_asset(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
     let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "view.html");
     app_state
         .log_file
@@ -267,7 +284,9 @@ pub async fn get_static_file<P: AsRef<Path>>(path: P) -> actix_web::Result<HttpR
             html = html.replace(k, v);
         }
 
-        return Ok(HttpResponse::Ok().content_type("text/html; charset=utf-8").body(html));
+        return Ok(HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .body(html));
     }
 
     let bytes = tokio::fs::read(path)

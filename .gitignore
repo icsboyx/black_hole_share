@@ -4,3 +4,4 @@
 /data/storage/*
 /data/logs/*
 my_docker-compose.yaml
+.history/
