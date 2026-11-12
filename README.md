@@ -212,7 +212,7 @@ The requested duration is clamped to the supported range of `1..=60` minutes.
 
 `GET /api/content/{id}`
 
-Returns the raw content with the stored MIME type and a sandbox `Content-Security-Policy`, or `404` if the asset has expired or does not exist.
+Returns the raw content with the stored MIME type and a sandbox `Content-Security-Policy`. Returns `400` if `{id}` is not a valid UUID, or `404` if the asset has expired or does not exist.
 
 ### Stats
 

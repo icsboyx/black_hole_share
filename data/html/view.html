@@ -64,7 +64,7 @@
         const response = await fetch(`/api/content/${assetId}`);
 
         if (!response.ok) {
-          if (response.status === 404) {
+          if (response.status === 404 || response.status === 400) {
             contentArea.innerHTML = '<p class="error">Content not found or expired</p>';
           } else {
             contentArea.innerHTML = '<p class="error">Error loading content</p>';
