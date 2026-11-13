@@ -7,38 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-13
+
+### Breaking changes
+
+- `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read. Settings live in `data/admin/settings.json` and are edited in the admin panel; the server warns at startup when these variables are still set.
+- The per-IP limit of public uploads counts an IPv6 client per /64 instead of per address.
+- `GET /api/content/{id}` returns `400` instead of `404` when `{id}` is not a valid UUID.
+- `POST /api/upload` answers `415` to a body that is not `application/json` and `400` to invalid JSON.
+
 ### Added
 
-- Admin control panel at `/admin`: list and delete active assets, uploads per IP, usage against limits, password change.
-- First-login setup of a single admin account; credentials are stored as an Argon2id hash in `data/admin/credentials.json`.
-- Encrypted, `HttpOnly`, `SameSite=Strict` session cookie limited to `/api/admin`, valid for at most 8 hours; logout and password change end every session.
-- `ADMIN_COOKIE_SECURE` environment variable to allow the admin cookie over plain HTTP.
-- Admin actions, including failed logins, are written to the log.
-- Admin bar on every page, shown only to the logged-in admin, with links and logout.
-- Settings stored in `data/admin/settings.json` and edited from the admin panel: upload limits, log limits, trusted proxies, session lifetime, bind address and port. Limits apply immediately; bind address, port, and session lifetime after a restart. Every change is logged.
+**Admin panel**
+
+- `/admin` with a first-login setup of a single admin account (Argon2id hash in `data/admin/credentials.json`), tabs Overview, Settings, Account, and an admin bar on every page (Upload · Files · Stats · Admin), shown only to the logged-in admin.
+- Encrypted `HttpOnly`, `SameSite=Strict` session cookie limited to `/api/admin`, at most 8 hours by default; logout and password change end every session.
+- Overview: active assets, uploads per IP, usage against limits; early deletion of assets.
+- Admin actions, including failed logins, are logged.
+
+**Settings**
+
+- Every limit and server option in `data/admin/settings.json`, edited from the panel in one section per type, each saved on its own, with per-field errors, "Restore defaults", and a notice when a restart is needed. Every change is logged.
 - `GET /api/limits` returns the upload limits; the upload page builds its duration slider from them.
-- Admin panel tabs (Overview, Settings, Account); settings are split into sections per type, each saved on its own, with "Restore defaults".
-- File sharing for the admin: any file type stored on disk in `data/storage/`, shared through `/f/{id}` with an expiry, an optional download limit, and an optional opening time. Uploads stream to disk with progress; downloads are always whole-file attachments and each one is counted. Files survive restarts; orphaned or partial files are cleaned up at startup.
-- File sharing limits in the settings: max file size, total disk space, max duration.
-- `/files` page for the admin to share and manage files, linked from the admin bar (Upload · Files · Stats · Admin); the admin panel keeps the management tabs (Overview, Settings, Account).
-- Admin page helpers moved to `admin-common.js` and admin styles to `style.css`, shared by `admin.html` and `files.html`.
-- Optional encryption of shared files: a random 256-bit key per file, AES-256-GCM in 64 KiB chunks while uploading and downloading. The key is shown once after the upload, sent to the downloader separately from the link, and entered on the download page; it travels in a POST body, never in a URL. A wrong key does not use up a download.
-- The admin can show a file key again with their password: keys are stored wrapped for the admin's X25519 key pair, whose private key is encrypted with a key derived from the password. Existing accounts get their key pair at the next login.
-- New dependencies: `aes-gcm`, `x25519-dalek`, `hkdf`, `sha2`, `getrandom`, `zeroize`.
-- Upload requests: the admin creates a link (`/r/{id}`) with a title, message, largest file, accepted extensions, optional number of files, and an optional required uploader name; anyone with the link can send files. Received files are encrypted on arrival for the admin, never get a public link, and are downloaded from the new **Received** tab with the admin password.
-- `/files` is split into tabs: Share, Requests, Received.
+- **Restart server** button: a graceful stop and a restart in the same process, so restart-only settings apply without touching the container.
 
-### Changed
+**File sharing** (`/files`, tabs Share · Requests · Received)
 
-- `GET /api/content/{id}` returns 400 instead of 404 when `{id}` is not a valid UUID.
-- **Breaking:** `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; set them in the admin panel. The server warns at startup when they are still set.
-- `POST /api/upload` reads its body against the current size limit instead of a JSON limit fixed at startup; a body that is not `application/json` gets `415`, invalid JSON gets `400`.
+- Files of any type stored on disk in `data/storage/`, shared through `/f/{id}` with an expiry, an optional download limit, and an optional opening time. Uploads stream to disk with progress and cancel; downloads are whole-file attachments, each one counted. Files survive restarts; orphaned or partial files are cleaned up at startup.
+- Optional encryption per file: a random 256-bit key, AES-256-GCM in 64 KiB chunks while uploading and downloading. The key is sent to the downloader apart from the link and entered on the download page, in a POST body, never in a URL; a wrong key does not use up a download. The admin can show a key again with the password: keys are wrapped for the admin's X25519 key pair, whose private key is encrypted with a key derived from the password.
+- Upload requests: links (`/r/{id}`) that let anyone send files to the admin, with a title, message, total size (100 MB by default), largest file, accepted extensions, optional number of files, optional expiry, and an optional required uploader name. Received files are encrypted on arrival for the admin, never get a public link, and are downloaded from the **Received** tab with the password.
+- Limits in the settings: largest file, disk budget, longest duration.
+
+**HTTPS and abuse limits**
+
+- `public_url`, used for every copied link.
+- HTTPS served by the server itself, for setups without a TLS proxy: a generated self-signed certificate or PEM files, chosen in the panel. While HTTPS runs, plain HTTP redirects to it; if it cannot start, the server falls back to HTTP and the panel shows why.
+- The admin cookie is `Secure` when HTTPS runs in the server or when the public URL is `https://` behind a TLS proxy; `ADMIN_COOKIE_SECURE` overrides that rule.
+- Wrong admin passwords lock a client out (5 attempts, 15 minutes by default) on login and every password prompt.
+- Request links accept at most 30 files per client per hour by default.
+
+**Other**
+
+- Log events are also printed to standard output, for `docker logs` / `podman logs`.
+- Pages fit phone screens.
+- Uploaded text is served as `text/plain; charset=utf-8`.
+- New dependencies: `actix-session`, `argon2`, `aes-gcm`, `x25519-dalek`, `hkdf`, `sha2`, `getrandom`, `zeroize`, `rustls` (ring backend), `rcgen`.
+
+### Removed
+
+- The unused `actix-files` dependency.
 
 ### Fixed
 
 - On every page only the content area scrolls; the footer stays below it and no longer covers the end of long pages.
-
 - The per-IP upload limit is keyed by the asset's own expiry time, so releasing a slot always frees the right one.
+- A failed log rotation no longer makes every later log write fail; logging continues in the current file.
+- A missing `data/html/` directory no longer panics on the first request.
 
 ## [1.3.0] - 2026-11-04
 

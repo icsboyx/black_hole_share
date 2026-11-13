@@ -11,9 +11,11 @@ use uuid::Uuid;
 
 use crate::auth::CredentialStore;
 use crate::files::FileStore;
-use crate::requests::RequestStore;
 use crate::logs::{LogEventType, LogFile};
+use crate::requests::RequestStore;
 use crate::settings::{Settings, SettingsStore};
+use crate::throttle::{Throttle, client_key};
+use crate::tls::TlsStatus;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Asset {
@@ -107,6 +109,38 @@ pub struct AppState {
     pub settings: SettingsStore,
     pub files: FileStore,
     pub requests: RequestStore,
+    /// Failed password attempts per client.
+    pub login_throttle: Throttle,
+    /// Uploads to request links per client.
+    pub request_throttle: Throttle,
+    /// HTTPS as it was set up at startup.
+    pub tls_status: Arc<TlsStatus>,
+    /// Set by the admin panel's restart button; `main` stops the server and restarts it.
+    pub restart: RestartSignal,
+}
+
+/// A request to restart the server, from a request handler to `main`.
+#[derive(Clone, Debug, Default)]
+pub struct RestartSignal {
+    requested: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl RestartSignal {
+    pub fn request(&self) {
+        self.requested
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // notify_one keeps the wake-up even if nobody is waiting yet.
+        self.notify.notify_one();
+    }
+
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn wait(&self) {
+        self.notify.notified().await;
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -233,6 +267,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     /// Takes an upload slot for `client_ip` unless it already holds `max_uploads` of them.
+    /// IPv6 clients share the slots of their /64 (see [`client_key`]).
     pub async fn check(
         &self,
         client_ip: &str,
@@ -243,7 +278,7 @@ impl RateLimiter {
         let now = Utc::now().timestamp_millis();
         let mut clients = self.clients.lock().await;
         let entry = clients
-            .entry(client_ip.to_string())
+            .entry(client_key(client_ip))
             .or_insert_with(Vec::new);
 
         if entry.len() < max_uploads {
@@ -264,7 +299,7 @@ impl RateLimiter {
     /// Gives back a slot taken by `check` when the asset could not be stored.
     pub async fn release(&self, client_ip: &str, asset_exp_time: i64) {
         let mut clients = self.clients.lock().await;
-        if let Some(entry) = clients.get_mut(client_ip)
+        if let Some(entry) = clients.get_mut(&client_key(client_ip))
             && let Some(index) = entry.iter().position(|&time| time == asset_exp_time)
         {
             entry.swap_remove(index);

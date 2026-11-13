@@ -93,6 +93,21 @@
             Changes apply immediately, except fields marked <span class="restart-tag">restart</span>, which take
             effect after the server restarts.</p>
           <p id="settingsMessage" class="message"></p>
+          <div class="settings-card" id="restartCard">
+            <div class="settings-head">
+              <div>
+                <h2>Server</h2>
+                <p id="restartInfo">Restart the server to apply the fields marked restart.</p>
+              </div>
+              <div class="chips" id="restartChips"></div>
+            </div>
+            <div class="settings-foot">
+              <p class="message" id="restartMessage"></p>
+              <div class="settings-actions">
+                <button class="btn-primary" type="button" id="restartBtn">Restart server</button>
+              </div>
+            </div>
+          </div>
           <div id="settingsSections"></div>
         </div>
 
@@ -292,7 +307,7 @@
       {
         id: "network",
         title: "Network",
-        description: "If you change the address or port, update the container port mapping (-p) too, " +
+        description: "If you change the address or a port (also the HTTPS port), update the container port mapping (-p) too, " +
           "or the server is unreachable after the restart.",
         fields: [
           { name: "bind_addr", label: "Bind address", kind: "ip", help: "0.0.0.0 listens on every interface" },
@@ -300,6 +315,50 @@
           {
             name: "trusted_proxies", label: "Trusted proxies", kind: "ips", wide: true,
             help: "Comma-separated IPs allowed to report the client address via X-Forwarded-For",
+          },
+        ],
+      },
+      {
+        id: "https",
+        title: "Address & HTTPS",
+        description: "The address people use, and whether this server serves HTTPS itself. " +
+          "Behind Caddy or nginx with ACME, keep HTTPS off here: the proxy does TLS.",
+        status: true,
+        fields: [
+          {
+            name: "public_url", label: "Public URL", kind: "text", wide: true, placeholder: "https://share.example.com",
+            help: "Used for every link you copy. If it starts with https://, after a restart the admin login works only over HTTPS",
+          },
+          {
+            name: "tls_mode", label: "HTTPS in this server", kind: "select",
+            options: [
+              ["off", "Off: plain HTTP (behind a proxy)"],
+              ["self_signed", "Self-signed certificate"],
+              ["files", "My own certificate files"],
+            ],
+            help: "Self-signed: generated for the public URL's host; browsers show a warning",
+          },
+          { name: "https_port", label: "HTTPS port", kind: "int", help: "The HTTP port redirects here while HTTPS runs" },
+          {
+            name: "tls_cert_path", label: "Certificate file", kind: "text", wide: true, placeholder: "/data/admin/tls/fullchain.pem",
+            help: "Only for your own certificate: PEM chain, path inside the container",
+          },
+          {
+            name: "tls_key_path", label: "Private key file", kind: "text", wide: true, placeholder: "/data/admin/tls/privkey.pem",
+            help: "Only for your own certificate: PEM private key",
+          },
+        ],
+      },
+      {
+        id: "abuse",
+        title: "Abuse limits",
+        description: "Per client address (IPv6: per /64). Wrong passwords count on login and on every password prompt.",
+        fields: [
+          { name: "max_login_failures", label: "Wrong passwords", kind: "int", help: "Before the address is locked out" },
+          { name: "login_lockout_minutes", label: "Lockout", kind: "int", unit: "min", help: "1 to 1440" },
+          {
+            name: "max_request_uploads_per_ip_per_hour", label: "Request uploads", kind: "int", unit: "per hour",
+            help: "Files one address may send through your request links",
           },
         ],
       },
@@ -334,8 +393,18 @@
     function buildSettingsSections(restartFields) {
       const sections = SETTING_GROUPS.map((group) => {
         const fields = group.fields.map((field) => {
-          const input = el("input", { id: `setting-${field.name}`, name: field.name, autocomplete: "off" });
-          if (field.kind === "int") {
+          const input = field.kind === "select"
+            ? el(
+              "select",
+              { id: `setting-${field.name}`, name: field.name },
+              ...field.options.map(([value, text]) => el("option", { value }, text))
+            )
+            : el("input", { id: `setting-${field.name}`, name: field.name, autocomplete: "off" });
+          if (field.placeholder) input.placeholder = field.placeholder;
+          if (field.kind === "select") {
+            // A select alone in its box fills it.
+            input.classList.add("select-full");
+          } else if (field.kind === "int") {
             Object.assign(input, { type: "number", step: "1", min: "0", inputMode: "numeric" });
           } else if (field.kind === "mib" || field.kind === "gib") {
             Object.assign(input, { type: "number", step: "any", min: "0", inputMode: "decimal" });
@@ -377,6 +446,7 @@
             el("div", {}, el("h2", {}, group.title), el("p", {}, group.description)),
             el("div", { className: "chips", id: `chips-${group.id}` })
           ),
+          ...(group.status ? [el("div", { className: "tls-status", id: `status-${group.id}` })] : []),
           el("div", { className: "settings-grid" }, ...fields),
           el(
             "div",
@@ -386,6 +456,7 @@
           )
         );
         form.addEventListener("input", () => updateGroupState(group));
+        form.addEventListener("change", () => updateGroupState(group));
         form.addEventListener("submit", (event) => {
           event.preventDefault();
           saveGroup(group);
@@ -491,7 +562,131 @@
         fillGroup(group, settingsState.current);
         setMessage(`settingsMessage-${group.id}`, "");
       }
+      renderTlsStatus();
+      renderRestartCard();
       setMessage("settingsMessage", "");
+    }
+
+    function renderRestartCard() {
+      if (!settingsState) return;
+      const pending = settingsState.restart_pending;
+      document.getElementById("restartInfo").textContent = pending.length > 0
+        ? `Saved but not running yet: ${pending.join(", ")}. Restart the server to apply them.`
+        : "Everything saved is running. A restart is only needed after changing a field marked restart.";
+      document.getElementById("restartChips").replaceChildren(
+        ...(pending.length > 0 ? [el("span", { className: "chip restart" }, "Restart required")] : [])
+      );
+    }
+
+    // Where the panel lives after the restart: HTTPS turns on or off with it.
+    function addressAfterRestart() {
+      const saved = settingsState.current;
+      if (saved.tls_mode === "off") return null;
+      if (saved.public_url && saved.public_url.startsWith("https://")) {
+        return `${saved.public_url.replace(/\/+$/, "")}/admin#settings`;
+      }
+      const port = saved.https_port === 443 ? "" : `:${saved.https_port}`;
+      return `https://${location.hostname}${port}/admin#settings`;
+    }
+
+    async function restartServer() {
+      if (!confirm(
+        "Restart the server now? Uploads and downloads in progress get up to 30 seconds to finish. " +
+          "If the saved address or ports cannot be used, the server does not come back and must be started by hand."
+      )) return;
+      const before = (await api("/status")).data?.started_at;
+      const button = document.getElementById("restartBtn");
+      button.disabled = true;
+      const result = await api("/restart", { method: "POST" });
+      if (result.response.status === 401) {
+        button.disabled = false;
+        show("loginView");
+        return;
+      }
+      if (result.response.status !== 202) {
+        button.disabled = false;
+        setMessage("restartMessage", errorText(result, "Restart failed"));
+        return;
+      }
+      setMessage("restartMessage", "Restarting...", "ok");
+      const target = addressAfterRestart();
+      const httpsChanges = target !== null && location.protocol === "http:";
+      // Wait for the new process: its start time differs from the old one.
+      for (let attempt = 0; attempt < 90; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (httpsChanges && attempt >= 3) break;
+        try {
+          const response = await fetch("/api/admin/status", { cache: "no-store" });
+          if (response.ok) {
+            const status = await response.json();
+            if (status.started_at !== before) {
+              location.reload();
+              return;
+            }
+          }
+        } catch {
+          // Down while it restarts.
+        }
+      }
+      if (httpsChanges) {
+        // Plain HTTP now redirects to HTTPS: go there directly.
+        location.href = target;
+        return;
+      }
+      button.disabled = false;
+      setMessage("restartMessage", "The server did not come back within 90 seconds. Check the container log.");
+    }
+
+    document.getElementById("restartBtn").addEventListener("click", restartServer);
+
+    // What runs now, which can differ from the saved settings until a restart.
+    function renderTlsStatus() {
+      const target = document.getElementById("status-https");
+      if (!target || !settingsState) return;
+      const tls = settingsState.tls;
+      const lines = [];
+      let kind = "info";
+      if (tls.active) {
+        kind = "ok";
+        lines.push(el("strong", {}, `HTTPS is running on port ${tls.https_port}; plain HTTP redirects to it.`));
+        if (tls.names.length > 0) lines.push(el("span", {}, `Self-signed for: ${tls.names.join(", ")}`));
+        lines.push(el("span", {}, "Certificate SHA-256 (compare with what the browser shows):"));
+        lines.push(el("code", {}, tls.fingerprint));
+      } else if (tls.error) {
+        kind = "error";
+        lines.push(el("strong", {}, "HTTPS is configured but not running: the server fell back to plain HTTP."));
+        lines.push(el("code", {}, tls.error));
+      } else {
+        lines.push(el("strong", {}, "HTTPS is off in this server: it serves plain HTTP."));
+        lines.push(el("span", {}, "Right behind Caddy or nginx; otherwise logins and keys travel unencrypted."));
+      }
+      const saved = settingsState.current;
+      if (saved.tls_mode !== "off") {
+        lines.push(el(
+          "span",
+          {},
+          `In a container, publish the HTTPS port too (for example -p ${saved.https_port}:${saved.https_port}): ` +
+            `while HTTPS runs, the HTTP port sends every visitor to port ${saved.https_port}.`
+        ));
+      }
+      if (saved.tls_mode === "self_signed") {
+        const host = location.hostname.replace(/^\[|\]$/g, "");
+        const names = tls.active ? tls.names : [];
+        if (!saved.public_url) {
+          lines.push(el(
+            "span",
+            {},
+            "The certificate covers localhost only: set the public URL to the address you use, " +
+              `for example https://${host}:${saved.https_port}, so its name matches.`
+          ));
+        } else if (tls.active && !names.includes(host)) {
+          lines.push(el("span", {}, `This page is open as ${host}, which the certificate does not cover.`));
+        }
+      }
+      const pending = settingsState.restart_pending.filter((name) => groupOf(name)?.id === "https");
+      if (pending.length > 0) lines.push(el("em", {}, "Saved changes apply after a restart."));
+      target.className = `tls-status ${kind}`;
+      target.replaceChildren(...lines);
     }
 
     // Saves one section. The other fields are sent with their saved values, so unsaved
@@ -507,6 +702,8 @@
       if (result.response.ok) {
         settingsState = result.data;
         fillGroup(group, settingsState.current);
+        renderTlsStatus();
+        renderRestartCard();
         setMessage(messageId, "Saved.", "ok");
         for (const other of SETTING_GROUPS) updateGroupState(other);
         await loadDashboard();

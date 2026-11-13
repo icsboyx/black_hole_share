@@ -41,7 +41,7 @@
 
     .request-facts {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 1px;
       background-color: rgba(89, 89, 89, 0.5);
       border-top: 1px solid rgba(89, 89, 89, 0.5);
@@ -215,6 +215,13 @@
       return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
     }
 
+    // Space the link still accepts, counting the files sent from this page.
+    function bytesLeft() {
+      if (info.bytes_left === null || info.bytes_left === undefined) return Infinity;
+      const sent = queue.filter((entry) => entry.state === "done").reduce((sum, entry) => sum + entry.file.size, 0);
+      return Math.max(0, info.bytes_left - sent);
+    }
+
     // The same checks as the server, so a wrong file is reported before it is sent.
     function problemWith(file) {
       if (info.extensions.length > 0 && !info.extensions.includes(extensionOf(file.name))) {
@@ -224,6 +231,19 @@
         return `Too large: at most ${formatBytes(info.max_file_size_bytes)}`;
       }
       return null;
+    }
+
+    // Marks ready files that together go over the space left.
+    function checkSpace() {
+      let left = bytesLeft();
+      for (const entry of queue.filter((item) => item.state === "ready")) {
+        if (entry.file.size > left) {
+          entry.state = "failed";
+          entry.error = `Not enough space left on this link (${formatBytes(left)})`;
+        } else {
+          left -= entry.file.size;
+        }
+      }
     }
 
     function sentCount() {
@@ -244,7 +264,7 @@
 
     function render() {
       const left = filesLeft();
-      if (left <= 0 && sentCount() === 0) {
+      if ((left <= 0 || bytesLeft() === 0) && sentCount() === 0) {
         showMissing("This link is closed", "It has already received all the files it accepts.");
         return;
       }
@@ -255,9 +275,13 @@
 
       const facts = [
         ["Largest file", formatBytes(info.max_file_size_bytes)],
+        ...(info.bytes_left === null || info.bytes_left === undefined ? [] : [["Space left", formatBytes(bytesLeft())]]),
         ["File types", info.extensions.length > 0 ? info.extensions.join(", ") : "Any"],
         ["Files left", info.files_left === null ? "No limit" : Math.max(0, left)],
       ];
+      if (info.expires_at !== null) {
+        facts.push(["Open until", new Date(info.expires_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })]);
+      }
 
       const nameInput = el("input", {
         id: "uploaderName",
@@ -277,7 +301,7 @@
         ),
       ];
 
-      if (left > 0) {
+      if (left > 0 && bytesLeft() > 0) {
         const fileInput = el("input", { id: "fileInput", type: "file", multiple: left > 1, hidden: true });
         if (info.extensions.length > 0) {
           fileInput.accept = info.extensions.map((ext) => `.${ext}`).join(",");
@@ -321,7 +345,7 @@
         body.push(el("ul", { className: "queue" }, ...items));
       }
 
-      if (left > 0) {
+      if (left > 0 && bytesLeft() > 0) {
         const ready = queue.some((entry) => entry.state === "ready");
         const sendBtn = el("button", { className: "send-btn", type: "button", disabled: uploading || !ready }, "Send");
         sendBtn.addEventListener("click", sendAll);
@@ -364,6 +388,7 @@
         entry.state = "failed";
         entry.error = "More files than this link accepts";
       }
+      checkSpace();
       setLine("");
       render();
     }
@@ -427,6 +452,10 @@
     async function load() {
       try {
         const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}`, { cache: "no-store" });
+        if (response.status === 410) {
+          showMissing("This link has expired", "Ask the person who sent it for a new one.");
+          return;
+        }
         if (!response.ok) {
           showMissing("This link is not valid", "It may have been closed. Ask the person who sent it for a new one.");
           return;

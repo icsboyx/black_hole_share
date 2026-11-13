@@ -9,11 +9,16 @@ mod logs;
 mod settings;
 #[cfg(test)]
 mod tests;
+mod throttle;
+mod tls;
 
 use actix_web::{
-    App, HttpRequest, HttpResponse, HttpServer, get,
-    http::StatusCode,
-    middleware::DefaultHeaders,
+    App, HttpRequest, HttpResponse, HttpServer,
+    body::{EitherBody, MessageBody},
+    dev::{ServiceRequest, ServiceResponse},
+    get,
+    http::{StatusCode, header},
+    middleware::{DefaultHeaders, Next, from_fn},
     mime, route,
     web::{self},
 };
@@ -34,6 +39,7 @@ pub static LOG_DIR: &str = "data/logs/";
 pub static ADMIN_CREDENTIALS_FILE: &str = "data/admin/credentials.json";
 pub static SESSION_KEY_FILE: &str = "data/admin/session.key";
 pub static SETTINGS_FILE: &str = "data/admin/settings.json";
+pub static TLS_DIR: &str = "data/admin/tls/";
 pub static STORAGE_DIR: &str = "data/storage/";
 pub static REQUESTS_FILE: &str = "data/storage/requests.json";
 pub static LOG_FILE_NAME: &str = "log.txt";
@@ -71,15 +77,22 @@ pub static HTML_VARS: LazyLock<Vec<(&str, &str)>> = LazyLock::new(|| {
     ]
 });
 
-pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
-    fs::read_dir(HTML_DIR)
-        .unwrap()
+/// When this process started, Unix ms: the admin page sees it change after a restart.
+pub static STARTED_AT: LazyLock<i64> = LazyLock::new(|| chrono::Utc::now().timestamp_millis());
+
+// Read once: a missing html directory leaves no static pages instead of a panic in a request.
+pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| match fs::read_dir(HTML_DIR) {
+    Ok(entries) => entries
         .filter_map(|entry| {
             entry
                 .ok()
                 .and_then(|e| e.file_name().to_str().map(|s| s.to_string()))
         })
-        .collect()
+        .collect(),
+    Err(e) => {
+        eprintln!("Cannot list {HTML_DIR}: {e}; no static files will be served");
+        Vec::new()
+    }
 });
 
 use crate::{
@@ -220,6 +233,7 @@ async fn catch_all(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    LazyLock::force(&STARTED_AT);
     warn_ignored_env_vars();
     let settings = settings::SettingsStore::load(SETTINGS_FILE).await?;
     let startup = settings.running().clone();
@@ -235,9 +249,58 @@ async fn main() -> Result<()> {
     if !admin.is_configured().await {
         println!("Admin credentials not set: the first visitor of /admin can create them.");
     }
+
+    // HTTPS is optional and must never lock the admin out: when it cannot start, the
+    // server runs on plain HTTP and the admin panel shows the error.
+    let mut tls_status = tls::TlsStatus {
+        mode: startup.tls_mode,
+        ..Default::default()
+    };
+    let mut https = None;
+    match tls::prepare(&startup, Path::new(TLS_DIR)).await {
+        Ok(None) => {}
+        Ok(Some(setup)) => {
+            let addr = (startup.bind_addr, startup.https_port);
+            match std::net::TcpListener::bind(addr) {
+                Ok(listener) => {
+                    tls_status.active = true;
+                    tls_status.https_port = Some(startup.https_port);
+                    tls_status.fingerprint = Some(setup.fingerprint);
+                    tls_status.names = setup.names;
+                    https = Some((listener, setup.config));
+                }
+                Err(e) => {
+                    tls_status.error = Some(format!(
+                        "cannot listen on port {}: {e}",
+                        startup.https_port
+                    ))
+                }
+            }
+        }
+        Err(e) => tls_status.error = Some(format!("{e:#}")),
+    }
+    if let Some(error) = &tls_status.error {
+        eprintln!("HTTPS is not running, serving plain HTTP only: {error}");
+    }
+
+    // Secure when this server serves HTTPS, or when a TLS proxy in front of it does (TLS off
+    // here, https public URL). If this server's own TLS failed, it only speaks HTTP: a
+    // Secure cookie would lock the admin out of the panel that can fix it.
+    let cookie_secure = match admin_cookie_secure_override()? {
+        Some(secure) => secure,
+        None => {
+            tls_status.active
+                || (startup.tls_mode == settings::TlsMode::Off && startup.public_url_is_https())
+        }
+    };
+    if !cookie_secure {
+        println!(
+            "The admin cookie works over plain HTTP: set an https public URL or enable HTTPS in the admin panel."
+        );
+    }
     let session_settings = admin::SessionSettings {
         key: auth::load_or_create_session_key(Path::new(SESSION_KEY_FILE)).await?,
-        cookie_secure: admin_cookie_secure()?,
+        cookie_secure,
         max_age_secs: startup.admin_session_max_age_secs(),
     };
 
@@ -249,10 +312,21 @@ async fn main() -> Result<()> {
         settings,
         files: files::FileStore::load(STORAGE_DIR).await?,
         requests: requests::RequestStore::load(REQUESTS_FILE).await?,
+        login_throttle: Default::default(),
+        request_throttle: Default::default(),
+        tls_status: std::sync::Arc::new(tls_status),
+        restart: Default::default(),
     };
+    let restart = app_state.restart.clone();
 
     let bind = (startup.bind_addr, startup.bind_port);
     println!("Starting server at http://{}/", SocketAddr::from(bind));
+    if app_state.tls_status.active {
+        println!(
+            "Serving HTTPS at https://{}/ (plain HTTP redirects there)",
+            SocketAddr::from((startup.bind_addr, startup.https_port))
+        );
+    }
 
     let inner_app_state = app_state.clone();
     tokio::spawn(async move {
@@ -264,16 +338,104 @@ async fn main() -> Result<()> {
             }
         }
     });
-    HttpServer::new(move || {
+    let mut server = HttpServer::new(move || {
         App::new()
+            .wrap(from_fn(redirect_plain_http))
             .wrap(security_headers())
             .app_data(web::Data::new(app_state.clone()))
             .configure(|cfg| configure_routes(cfg, &session_settings))
     })
-    .bind(bind)?
-    .run()
-    .await?;
+    .bind(bind)?;
+    if let Some((listener, config)) = https {
+        server = server.listen_rustls_0_23(listener, config)?;
+    }
+    let server = server.run();
+
+    // The restart button stops the server gracefully: no new connections, and requests in
+    // progress (downloads included) get up to the shutdown timeout to finish.
+    let handle = server.handle();
+    let waiter = restart.clone();
+    tokio::spawn(async move {
+        waiter.wait().await;
+        println!("Restart requested from the admin panel: stopping the server");
+        handle.stop(true).await;
+    });
+    server.await?;
+
+    if restart.is_requested() {
+        restart_process()?;
+    }
     Ok(())
+}
+
+/// Replaces this process with a fresh start of the same program and arguments. The PID
+/// stays the same, so a container keeps running without a restart policy.
+#[cfg(unix)]
+fn restart_process() -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+
+    // After a rebuild the running file may be gone; argv[0] then finds the new one.
+    let program = env::current_exe()
+        .ok()
+        .filter(|path| path.exists())
+        .map(std::ffi::OsString::from)
+        .or_else(|| env::args_os().next())
+        .ok_or_else(|| anyhow::anyhow!("cannot find the program to restart"))?;
+    println!("Restarting {}", program.to_string_lossy());
+    std::io::stdout().flush().ok();
+    // `exec` returns only when it fails.
+    let error = std::process::Command::new(&program)
+        .args(env::args_os().skip(1))
+        .exec();
+    Err(anyhow::anyhow!(
+        "cannot restart {}: {error}",
+        program.to_string_lossy()
+    ))
+}
+
+#[cfg(not(unix))]
+fn restart_process() -> Result<()> {
+    anyhow::bail!("restarting from the admin panel is supported on Unix only; start the server again")
+}
+
+/// While HTTPS is running, sends every plain-HTTP request to the HTTPS port (308 keeps the
+/// method and body).
+pub(crate) async fn redirect_plain_http<B: MessageBody + 'static>(
+    req: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<EitherBody<B>>, actix_web::Error> {
+    let target = match req.app_data::<web::Data<AppState>>() {
+        Some(state) if state.tls_status.active && !req.app_config().secure() => {
+            let host = req.connection_info().host().to_string();
+            let path = req
+                .uri()
+                .path_and_query()
+                .map_or("/", |p| p.as_str())
+                .to_string();
+            let port = state.tls_status.https_port.unwrap_or(443);
+            Some(tls::https_redirect_target(
+                &state.settings.get(),
+                port,
+                &host,
+                &path,
+            ))
+        }
+        _ => None,
+    };
+    match target {
+        Some(target) => Ok(req
+            .into_response(
+                HttpResponse::PermanentRedirect()
+                    .insert_header((header::LOCATION, target))
+                    .finish(),
+            )
+            .map_into_right_body()),
+        None => next
+            .call(req)
+            .await
+            .map(ServiceResponse::map_into_left_body),
+    }
 }
 
 fn security_headers() -> DefaultHeaders {
@@ -310,11 +472,13 @@ fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::Sess
 
 /// `ADMIN_COOKIE_SECURE=false` lets the admin cookie work over plain HTTP. Any value other
 /// than `true` or `false` stops the server instead of silently weakening the cookie.
-fn admin_cookie_secure() -> Result<bool> {
+/// `ADMIN_COOKIE_SECURE` forces the cookie's `Secure` flag; unset, it follows the HTTPS
+/// setup. It stays as an emergency switch for a broken configuration.
+fn admin_cookie_secure_override() -> Result<Option<bool>> {
     match env::var("ADMIN_COOKIE_SECURE") {
-        Err(env::VarError::NotPresent) => Ok(true),
-        Ok(value) if value == "true" => Ok(true),
-        Ok(value) if value == "false" => Ok(false),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Ok(value) if value == "true" => Ok(Some(true)),
+        Ok(value) if value == "false" => Ok(Some(false)),
         Ok(value) => anyhow::bail!("ADMIN_COOKIE_SECURE must be 'true' or 'false', got '{value}'"),
         Err(e) => anyhow::bail!("ADMIN_COOKIE_SECURE is not valid UTF-8: {e}"),
     }

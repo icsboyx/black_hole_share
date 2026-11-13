@@ -53,7 +53,8 @@ body {
 
 /* Centered content column inside the scroll area. */
 .page-column {
-  width: 660px;
+  width: 100%;
+  max-width: 660px;
   min-height: 100%;
   margin: 0 auto;
   padding: 20px;
@@ -62,7 +63,7 @@ body {
 }
 
 body.view-page .page-column {
-  width: 860px;
+  max-width: 860px;
 }
 
 /* Admin navigation bar (nav.js): only rendered for a logged-in admin, above the scroll area. */
@@ -662,7 +663,8 @@ h1 .home-link:hover {
 }
 
 .content-area {
-  width: 800px;
+  width: 100%;
+  max-width: 800px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -753,7 +755,8 @@ h1 .home-link:hover {
 }
 
 .text-content-view {
-  width: 760px;
+  width: 100%;
+  max-width: 760px;
   max-height: 560px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -827,7 +830,8 @@ h1 .home-link:hover {
 }
 
 .auth-panel {
-  width: 420px;
+  width: 100%;
+  max-width: 420px;
   margin: 40px auto 0 auto;
 }
 
@@ -1411,6 +1415,51 @@ td a:hover {
   margin: 0 auto 18px auto;
 }
 
+.input-wrap select.select-full {
+  flex: 1;
+  min-width: 0;
+  border-left: none;
+  color: var(--text-primary);
+  font-size: 0.95em;
+  padding: 9px 10px;
+}
+
+.tls-status {
+  display: grid;
+  gap: 6px;
+  margin: 16px 22px 0 22px;
+  padding: 12px 14px;
+  border: 1px solid rgba(51, 204, 255, 0.35);
+  border-radius: 10px;
+  background-color: rgba(51, 204, 255, 0.05);
+  color: var(--text-secondary);
+  font-size: 0.8em;
+}
+
+.tls-status strong {
+  color: var(--text-primary);
+}
+
+.tls-status.ok {
+  border-color: rgba(0, 255, 153, 0.4);
+  background-color: rgba(0, 255, 153, 0.05);
+}
+
+.tls-status.error {
+  border-color: rgba(255, 102, 102, 0.5);
+  background-color: rgba(255, 102, 102, 0.06);
+}
+
+.tls-status code {
+  color: var(--accent-green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.tls-status.error code {
+  color: #ff6666;
+}
+
 /* ------------------------------------------------------------------ encryption */
 
 .toggle {
@@ -1535,6 +1584,72 @@ td a:hover {
 .key-dialog .settings-head,
 .key-dialog .field {
   padding: 18px 22px 0 22px;
+}
+
+/* ------------------------------------------------------------------ phones */
+
+@media (max-width: 600px) {
+  .page-column {
+    padding: 14px 16px;
+  }
+
+  h1 {
+    font-size: 1.35em;
+  }
+
+  .admin-nav {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 12px;
+  }
+
+  .admin-nav-links {
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+
+  .admin-nav-links a,
+  .admin-nav-links button {
+    padding: 5px 8px;
+  }
+
+  .settings-head,
+  .settings-grid,
+  .settings-foot {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  #fileForm .settings-grid,
+  #requestForm .settings-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .share-result,
+  .tls-status {
+    margin-left: 14px;
+    margin-right: 14px;
+  }
+
+  .file-table {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .tabs {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .powered-by {
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    font-size: 0.85em;
+  }
+
+  .footer-logo {
+    height: 28px;
+  }
 }
 
 [hidden] {

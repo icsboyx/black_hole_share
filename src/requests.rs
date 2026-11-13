@@ -25,6 +25,9 @@ pub const MAX_UPLOADER_CHARS: usize = 100;
 pub const MAX_EXTENSIONS: usize = 50;
 pub const MAX_EXTENSION_CHARS: usize = 16;
 pub const MAX_FILES_PER_REQUEST: u32 = 10_000;
+pub const MAX_REQUEST_DURATION_MINUTES: u32 = 365 * 24 * 60;
+/// Total size a new request accepts when none is given.
+pub const DEFAULT_REQUEST_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UploadRequest {
@@ -33,17 +36,35 @@ pub struct UploadRequest {
     pub title: String,
     pub message: String,
     pub max_file_size_bytes: u64,
+    /// All files together. `None` only for requests created before this limit existed.
+    #[serde(default)]
+    pub max_total_bytes: Option<u64>,
     /// Lowercase, without the dot. Empty means any file type.
     pub extensions: Vec<String>,
     /// The request closes after this many files.
     pub max_files: Option<u32>,
     pub require_name: bool,
     pub created_at: i64,
+    /// After this time the link no longer accepts files. `None`: no expiry.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
     /// Files received so far.
     pub uploads: u32,
+    /// Bytes received so far.
+    #[serde(default)]
+    pub received_bytes: u64,
 }
 
 impl UploadRequest {
+    pub fn bytes_left(&self) -> Option<u64> {
+        self.max_total_bytes
+            .map(|max| max.saturating_sub(self.received_bytes))
+    }
+
+    pub fn is_expired(&self, now: i64) -> bool {
+        self.expires_at.is_some_and(|at| now >= at)
+    }
+
     /// Whether the name ends in one of the allowed extensions. The extension is only what
     /// the uploader chose to call the file; it says nothing certain about the content.
     pub fn allows(&self, file_name: &str) -> bool {
@@ -68,18 +89,37 @@ pub struct NewRequest {
     pub title: String,
     #[serde(default)]
     pub message: String,
-    pub max_file_size_bytes: u64,
+    /// All files together; 100 MiB when not given.
+    #[serde(default = "default_total")]
+    pub max_total_bytes: u64,
+    /// Largest single file; the total when not given. Never above the total.
+    #[serde(default)]
+    pub max_file_size_bytes: Option<u64>,
     #[serde(default)]
     pub extensions: Vec<String>,
     #[serde(default)]
     pub max_files: Option<u32>,
     #[serde(default)]
     pub require_name: bool,
+    /// How long the link accepts files. `None`: until it is full or closed.
+    #[serde(default)]
+    pub expires_in_minutes: Option<u32>,
+}
+
+fn default_total() -> u64 {
+    DEFAULT_REQUEST_TOTAL_BYTES
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SlotError {
     NotFound,
+    Expired,
+    /// The file is larger than the request's per-file limit.
+    FileTooLarge,
+    /// The file would go over what is left of the request's total.
+    TotalExceeded {
+        bytes_left: u64,
+    },
     /// Every allowed file is received or being received.
     Full,
 }
@@ -94,8 +134,9 @@ pub enum CreateError {
 pub struct RequestStore {
     path: PathBuf,
     requests: Arc<Mutex<Vec<UploadRequest>>>,
-    /// Uploads in progress per request, so concurrent uploads cannot exceed `max_files`.
-    pending: Arc<StdMutex<HashMap<Uuid, u32>>>,
+    /// Uploads in progress per request (count, bytes), so concurrent uploads cannot exceed
+    /// `max_files` or `max_total_bytes` together.
+    pending: Arc<StdMutex<HashMap<Uuid, (u32, u64)>>>,
 }
 
 /// The right to upload one file to a request. Dropping it without `complete` gives the
@@ -103,6 +144,7 @@ pub struct RequestStore {
 pub struct UploadSlot {
     store: RequestStore,
     request: UploadRequest,
+    bytes: u64,
 }
 
 impl UploadSlot {
@@ -119,6 +161,7 @@ impl UploadSlot {
         };
         let mut updated = requests.clone();
         updated[index].uploads += 1;
+        updated[index].received_bytes += self.bytes;
         self.store.persist(&updated).await?;
         *requests = updated;
         Ok(())
@@ -128,8 +171,9 @@ impl UploadSlot {
 impl Drop for UploadSlot {
     fn drop(&mut self) {
         let mut pending = self.store.pending.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(count) = pending.get_mut(&self.request.id) {
+        if let Some((count, bytes)) = pending.get_mut(&self.request.id) {
             *count -= 1;
+            *bytes -= self.bytes;
             if *count == 0 {
                 pending.remove(&self.request.id);
             }
@@ -161,8 +205,9 @@ impl RequestStore {
         &self,
         new: NewRequest,
         max_file_size_limit: u64,
+        max_total_limit: u64,
     ) -> Result<UploadRequest, CreateError> {
-        let request = validate(new, max_file_size_limit)?;
+        let request = validate(new, max_file_size_limit, max_total_limit)?;
         let mut requests = self.requests.lock().await;
         let mut updated = requests.clone();
         updated.push(request.clone());
@@ -197,26 +242,47 @@ impl RequestStore {
         Ok(Some(removed))
     }
 
-    /// Takes a place for one upload, if the request still accepts files.
-    pub async fn begin_upload(&self, id: &Uuid) -> Result<UploadSlot, SlotError> {
+    /// Takes a place for one upload of `bytes`, if the request still accepts files and the
+    /// file fits both the per-file limit and what is left of the total.
+    pub async fn begin_upload(&self, id: &Uuid, bytes: u64) -> Result<UploadSlot, SlotError> {
         let requests = self.requests.lock().await;
         let request = requests
             .iter()
             .find(|r| r.id == *id)
             .ok_or(SlotError::NotFound)?
             .clone();
+        if request.is_expired(Utc::now().timestamp_millis()) {
+            return Err(SlotError::Expired);
+        }
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        let in_progress = pending.get(id).copied().unwrap_or(0);
+        let (in_progress, pending_bytes) = pending.get(id).copied().unwrap_or((0, 0));
         if let Some(max) = request.max_files
             && request.uploads + in_progress >= max
         {
             return Err(SlotError::Full);
         }
-        *pending.entry(*id).or_insert(0) += 1;
+        if let Some(left) = request.bytes_left()
+            && left.saturating_sub(pending_bytes) == 0
+        {
+            return Err(SlotError::Full);
+        }
+        if bytes > request.max_file_size_bytes {
+            return Err(SlotError::FileTooLarge);
+        }
+        if let Some(left) = request.bytes_left() {
+            let left = left.saturating_sub(pending_bytes);
+            if bytes > left {
+                return Err(SlotError::TotalExceeded { bytes_left: left });
+            }
+        }
+        let entry = pending.entry(*id).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += bytes;
         drop(pending);
         Ok(UploadSlot {
             store: self.clone(),
             request,
+            bytes,
         })
     }
 
@@ -231,7 +297,13 @@ fn has_control_chars(text: &str, allow_newlines: bool) -> bool {
         .any(|c| c.is_control() && !(allow_newlines && matches!(c, '\n' | '\r' | '\t')))
 }
 
-fn validate(new: NewRequest, max_file_size_limit: u64) -> Result<UploadRequest, CreateError> {
+/// `max_file_size_limit` and `max_total_limit` come from the settings: the per-file limit
+/// and the disk budget of all files.
+fn validate(
+    new: NewRequest,
+    max_file_size_limit: u64,
+    max_total_limit: u64,
+) -> Result<UploadRequest, CreateError> {
     let invalid = |message: String| Err(CreateError::Invalid(message));
     let title = new.title.trim().to_string();
     if title.is_empty()
@@ -248,9 +320,18 @@ fn validate(new: NewRequest, max_file_size_limit: u64) -> Result<UploadRequest, 
             "The message must be at most {MAX_MESSAGE_CHARS} characters"
         ));
     }
-    if !(1..=max_file_size_limit).contains(&new.max_file_size_bytes) {
+    if !(1..=max_total_limit).contains(&new.max_total_bytes) {
         return invalid(format!(
-            "The largest file must be between 1 and {max_file_size_limit} bytes (the per-file limit in the settings)"
+            "The total size must be between 1 and {max_total_limit} bytes (the disk budget in the settings)"
+        ));
+    }
+    let max_file_size = new.max_file_size_bytes.unwrap_or(new.max_total_bytes);
+    if max_file_size == 0 || max_file_size > new.max_total_bytes {
+        return invalid("The largest file must be more than 0 and not above the total size".into());
+    }
+    if max_file_size > max_file_size_limit {
+        return invalid(format!(
+            "The largest file can be at most {max_file_size_limit} bytes (the per-file limit in the settings)"
         ));
     }
     let mut extensions: Vec<String> = Vec::new();
@@ -281,16 +362,29 @@ fn validate(new: NewRequest, max_file_size_limit: u64) -> Result<UploadRequest, 
             "Max files must be between 1 and {MAX_FILES_PER_REQUEST}"
         ));
     }
+    if let Some(minutes) = new.expires_in_minutes
+        && !(1..=MAX_REQUEST_DURATION_MINUTES).contains(&minutes)
+    {
+        return invalid(format!(
+            "The link can stay open between 1 and {MAX_REQUEST_DURATION_MINUTES} minutes"
+        ));
+    }
+    let now = Utc::now().timestamp_millis();
     Ok(UploadRequest {
         id: Uuid::new_v4(),
         title,
         message,
-        max_file_size_bytes: new.max_file_size_bytes,
+        max_file_size_bytes: max_file_size,
+        max_total_bytes: Some(new.max_total_bytes),
         extensions,
         max_files: new.max_files,
         require_name: new.require_name,
-        created_at: Utc::now().timestamp_millis(),
+        created_at: now,
+        expires_at: new
+            .expires_in_minutes
+            .map(|minutes| now + i64::from(minutes) * 60_000),
         uploads: 0,
+        received_bytes: 0,
     })
 }
 
@@ -319,16 +413,18 @@ mod tests {
         NewRequest {
             title: "Contract documents".into(),
             message: "Please send the signed copy.\nThanks".into(),
-            max_file_size_bytes: 100,
+            max_total_bytes: 1000,
+            max_file_size_bytes: Some(100),
             extensions: extensions.iter().map(|e| e.to_string()).collect(),
             max_files,
             require_name: false,
+            expires_in_minutes: None,
         }
     }
 
     #[test]
     fn extensions_are_normalized_and_checked_on_the_file_name() {
-        let created = validate(request(&[".PDF", " jpg", "pdf", ""], None), 1000).unwrap();
+        let created = validate(request(&[".PDF", " jpg", "pdf", ""], None), 1000, 10_000).unwrap();
         assert_eq!(created.extensions, vec!["pdf", "jpg"]);
         assert!(created.allows("Scan.Pdf"));
         assert!(created.allows("photo.final.JPG"));
@@ -336,7 +432,7 @@ mod tests {
         assert!(!created.allows("pdf"));
         assert!(!created.allows("document.pdf.exe"));
 
-        let any = validate(request(&[], None), 1000).unwrap();
+        let any = validate(request(&[], None), 1000, 10_000).unwrap();
         assert!(any.allows("whatever"));
     }
 
@@ -356,20 +452,44 @@ mod tests {
                 ..request(&[], None)
             },
             NewRequest {
-                max_file_size_bytes: 0,
+                max_file_size_bytes: Some(0),
+                ..request(&[], None)
+            },
+            // Per file above the total.
+            NewRequest {
+                max_file_size_bytes: Some(1001),
+                ..request(&[], None)
+            },
+            // Per file above the settings' per-file limit.
+            NewRequest {
+                max_total_bytes: 5000,
+                max_file_size_bytes: Some(1001),
+                ..request(&[], None)
+            },
+            // Total above the disk budget.
+            NewRequest {
+                max_total_bytes: 10_001,
+                max_file_size_bytes: None,
                 ..request(&[], None)
             },
             NewRequest {
-                max_file_size_bytes: 1001,
+                max_total_bytes: 0,
                 ..request(&[], None)
             },
             request(&["p.df"], None),
             request(&["tar/gz"], None),
             request(&[], Some(0)),
+            NewRequest {
+                expires_in_minutes: Some(0),
+                ..request(&[], None)
+            },
         ];
         for case in cases {
             assert!(
-                matches!(validate(case.clone(), 1000), Err(CreateError::Invalid(_))),
+                matches!(
+                    validate(case.clone(), 1000, 10_000),
+                    Err(CreateError::Invalid(_))
+                ),
                 "{case:?}"
             );
         }
@@ -384,28 +504,89 @@ mod tests {
         assert!(clean_uploader(Some("a\nb"), false).is_err());
     }
 
+    #[test]
+    fn largest_file_defaults_to_the_total() {
+        let created = validate(
+            NewRequest {
+                max_file_size_bytes: None,
+                ..request(&[], None)
+            },
+            1000,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(created.max_file_size_bytes, 1000);
+        assert_eq!(created.max_total_bytes, Some(1000));
+    }
+
+    #[tokio::test]
+    async fn slots_respect_the_total_size_including_uploads_in_progress() {
+        let path = std::env::temp_dir()
+            .join(format!("bhs-req-{}", Uuid::new_v4()))
+            .join("requests.json");
+        let store = RequestStore::load(path).await.unwrap();
+        // 1000 in total, at most 600 per file.
+        let created = store
+            .create(
+                NewRequest {
+                    max_file_size_bytes: Some(600),
+                    ..request(&[], None)
+                },
+                1000,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.begin_upload(&created.id, 601).await.err(),
+            Some(SlotError::FileTooLarge)
+        );
+        let first = store.begin_upload(&created.id, 600).await.unwrap();
+        // 600 are in progress: only 400 are left.
+        assert_eq!(
+            store.begin_upload(&created.id, 500).await.err(),
+            Some(SlotError::TotalExceeded { bytes_left: 400 })
+        );
+        let second = store.begin_upload(&created.id, 400).await.unwrap();
+        drop(second);
+        first.complete().await.unwrap();
+        assert_eq!(
+            store.get(&created.id).await.unwrap().bytes_left(),
+            Some(400)
+        );
+        let last = store.begin_upload(&created.id, 400).await.unwrap();
+        last.complete().await.unwrap();
+        assert_eq!(
+            store.begin_upload(&created.id, 1).await.err(),
+            Some(SlotError::Full)
+        );
+    }
+
     #[tokio::test]
     async fn slots_respect_max_files_and_are_given_back_when_dropped() {
         let path = std::env::temp_dir()
             .join(format!("bhs-req-{}", Uuid::new_v4()))
             .join("requests.json");
         let store = RequestStore::load(path.clone()).await.unwrap();
-        let created = store.create(request(&[], Some(2)), 1000).await.unwrap();
+        let created = store
+            .create(request(&[], Some(2)), 1000, 10_000)
+            .await
+            .unwrap();
 
-        let first = store.begin_upload(&created.id).await.unwrap();
-        let second = store.begin_upload(&created.id).await.unwrap();
+        let first = store.begin_upload(&created.id, 10).await.unwrap();
+        let second = store.begin_upload(&created.id, 10).await.unwrap();
         assert_eq!(
-            store.begin_upload(&created.id).await.err(),
+            store.begin_upload(&created.id, 10).await.err(),
             Some(SlotError::Full)
         );
 
         // A failed upload gives its place back.
         drop(second);
-        let second = store.begin_upload(&created.id).await.unwrap();
+        let second = store.begin_upload(&created.id, 10).await.unwrap();
         first.complete().await.unwrap();
         second.complete().await.unwrap();
         assert_eq!(
-            store.begin_upload(&created.id).await.err(),
+            store.begin_upload(&created.id, 10).await.err(),
             Some(SlotError::Full)
         );
         assert_eq!(store.get(&created.id).await.unwrap().files_left(), Some(0));
@@ -414,9 +595,32 @@ mod tests {
         let reloaded = RequestStore::load(path).await.unwrap();
         assert_eq!(reloaded.get(&created.id).await.unwrap().uploads, 2);
 
+        // An expired link refuses files.
+        let expiring = store
+            .create(
+                NewRequest {
+                    expires_in_minutes: Some(1),
+                    ..request(&[], None)
+                },
+                1000,
+                10_000,
+            )
+            .await
+            .unwrap();
+        assert!(store.begin_upload(&expiring.id, 10).await.is_ok());
+        {
+            let mut requests = store.requests.lock().await;
+            let entry = requests.iter_mut().find(|r| r.id == expiring.id).unwrap();
+            entry.expires_at = Some(Utc::now().timestamp_millis() - 1);
+        }
+        assert_eq!(
+            store.begin_upload(&expiring.id, 10).await.err(),
+            Some(SlotError::Expired)
+        );
+
         assert!(store.remove(&created.id).await.unwrap().is_some());
         assert_eq!(
-            store.begin_upload(&created.id).await.err(),
+            store.begin_upload(&created.id, 10).await.err(),
             Some(SlotError::NotFound)
         );
     }

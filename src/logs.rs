@@ -166,13 +166,28 @@ impl LogFile {
         let mut writer = self.writer.lock().await;
         if writer.size + line.len() as u64 > writer.max_bytes {
             writer.file.flush().await?;
-            LogFile::log_file_rotate(&self.path).await?;
-            LogFile::prune_rotated_logs(&self.path, writer.max_rotated).await?;
-            writer.file = LogFile::open_log(&self.path).await?;
+            // A failed rotation must not stop logging: the event is still written, and the
+            // next attempt waits until another `max_bytes` have been written.
+            match LogFile::log_file_rotate(&self.path).await {
+                Ok(()) => {
+                    if let Err(e) = LogFile::prune_rotated_logs(&self.path, writer.max_rotated).await
+                    {
+                        eprintln!("Cannot delete old rotated logs: {e:#}");
+                    }
+                    match LogFile::open_log(&self.path).await {
+                        Ok(file) => writer.file = file,
+                        // The old handle still writes, into the rotated file.
+                        Err(e) => eprintln!("Cannot open a new log file, still writing to the rotated one: {e:#}"),
+                    }
+                }
+                Err(e) => eprintln!("Log rotation failed, still writing to {}: {e:#}", self.path.display()),
+            }
             writer.size = 0;
         }
         writer.file.write_all(line.as_bytes()).await?;
         writer.size += line.len() as u64;
+        // The same line on stdout, so `docker logs` / `podman logs` show every event.
+        print!("{line}");
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 //! Runtime settings, stored in `data/admin/settings.json` and edited from the admin panel.
 //!
-//! Most values apply to the next request. `bind_addr`, `bind_port` and
+//! Most values apply to the next request. The listening addresses, the TLS setup and
 //! `admin_session_max_age_minutes` are read once at startup, so a change takes effect only
 //! after a restart; `running()` keeps the values the server started with.
 
@@ -31,6 +31,24 @@ pub const MAX_FILE_SIZE_LIMIT_BYTES: u64 = 100 * GIB;
 pub const MAX_FILE_DURATION_LIMIT_MINUTES: u32 = 365 * 24 * 60;
 pub const MIN_SESSION_MAX_AGE_MINUTES: u32 = 5;
 pub const MAX_SESSION_MAX_AGE_MINUTES: u32 = 7 * 24 * 60;
+pub const MAX_LOGIN_FAILURES_LIMIT: u32 = 100;
+pub const MAX_LOCKOUT_MINUTES: u32 = 24 * 60;
+pub const MAX_REQUEST_UPLOADS_PER_HOUR_LIMIT: u32 = 10_000;
+pub const MAX_PUBLIC_URL_CHARS: usize = 300;
+pub const MAX_TLS_PATH_CHARS: usize = 1000;
+
+/// How the server itself serves HTTPS. Behind a reverse proxy that does TLS (Caddy,
+/// nginx...) it stays `Off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsMode {
+    #[default]
+    Off,
+    /// A certificate generated and kept in `data/admin/tls/`. Browsers warn about it.
+    SelfSigned,
+    /// A certificate and key from PEM files given by path.
+    Files,
+}
 
 /// Missing fields take their default, so a file written by an older version still loads.
 /// Unknown fields are rejected: in a hand-edited file they are almost always typos.
@@ -59,6 +77,23 @@ pub struct Settings {
     pub bind_addr: IpAddr,
     /// Read at startup.
     pub bind_port: u16,
+    /// The address people use to reach the service, like `https://share.example.com`.
+    /// Used for the links the admin copies and for the self-signed certificate. Empty:
+    /// links use the address in the browser.
+    pub public_url: String,
+    /// Read at startup.
+    pub tls_mode: TlsMode,
+    /// Read at startup. PEM certificate chain for `TlsMode::Files`.
+    pub tls_cert_path: String,
+    /// Read at startup. PEM private key for `TlsMode::Files`.
+    pub tls_key_path: String,
+    /// Read at startup. HTTPS port when TLS is on; `bind_port` then redirects to it.
+    pub https_port: u16,
+    /// Wrong passwords from one address before it is locked out.
+    pub max_login_failures: u32,
+    pub login_lockout_minutes: u32,
+    /// Files one address may send through upload requests per hour.
+    pub max_request_uploads_per_ip_per_hour: u32,
 }
 
 impl Default for Settings {
@@ -80,6 +115,14 @@ impl Default for Settings {
             admin_session_max_age_minutes: 8 * 60,
             bind_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             bind_port: 8080,
+            public_url: String::new(),
+            tls_mode: TlsMode::Off,
+            tls_cert_path: String::new(),
+            tls_key_path: String::new(),
+            https_port: 8443,
+            max_login_failures: 5,
+            login_lockout_minutes: 15,
+            max_request_uploads_per_ip_per_hour: 30,
         }
     }
 }
@@ -186,7 +229,60 @@ impl Settings {
             "bind_port",
             "must be between 1 and 65535".into(),
         );
+        check(
+            self.public_url.is_empty() || public_url_host(&self.public_url).is_some(),
+            "public_url",
+            "must be empty or like https://share.example.com (scheme and host, optional port, no path)"
+                .into(),
+        );
+        let tls_on = self.tls_mode != TlsMode::Off;
+        check(
+            self.https_port >= 1,
+            "https_port",
+            "must be between 1 and 65535".into(),
+        );
+        check(
+            !tls_on || self.https_port != self.bind_port,
+            "https_port",
+            "must differ from the HTTP port".into(),
+        );
+        for (field, path) in [
+            ("tls_cert_path", &self.tls_cert_path),
+            ("tls_key_path", &self.tls_key_path),
+        ] {
+            check(
+                path.chars().count() <= MAX_TLS_PATH_CHARS && !path.chars().any(char::is_control),
+                field,
+                format!("must be at most {MAX_TLS_PATH_CHARS} characters"),
+            );
+            check(
+                self.tls_mode != TlsMode::Files || !path.trim().is_empty(),
+                field,
+                "is required for your own certificate".into(),
+            );
+        }
+        check(
+            (1..=MAX_LOGIN_FAILURES_LIMIT).contains(&self.max_login_failures),
+            "max_login_failures",
+            format!("must be between 1 and {MAX_LOGIN_FAILURES_LIMIT}"),
+        );
+        check(
+            (1..=MAX_LOCKOUT_MINUTES).contains(&self.login_lockout_minutes),
+            "login_lockout_minutes",
+            format!("must be between 1 and {MAX_LOCKOUT_MINUTES}"),
+        );
+        check(
+            (1..=MAX_REQUEST_UPLOADS_PER_HOUR_LIMIT)
+                .contains(&self.max_request_uploads_per_ip_per_hour),
+            "max_request_uploads_per_ip_per_hour",
+            format!("must be between 1 and {MAX_REQUEST_UPLOADS_PER_HOUR_LIMIT}"),
+        );
         errors
+    }
+
+    /// Whether `public_url` says people reach the service over HTTPS.
+    pub fn public_url_is_https(&self) -> bool {
+        self.public_url.starts_with("https://")
     }
 
     pub fn admin_session_max_age_secs(&self) -> i64 {
@@ -289,6 +385,50 @@ impl SettingsStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(std::mem::replace(&mut *current, new))
     }
+}
+
+/// The host of a valid public URL: `http` or `https`, a host name or IP, an optional port,
+/// and at most a trailing slash. `None` for anything else.
+pub fn public_url_host(url: &str) -> Option<&str> {
+    if url.chars().count() > MAX_PUBLIC_URL_CHARS {
+        return None;
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.strip_suffix('/').unwrap_or(rest);
+    if authority.is_empty() || authority.contains(['/', '?', '#', '@', ' ']) {
+        return None;
+    }
+    let (host, port) = if let Some(inner) = authority.strip_prefix('[') {
+        // [IPv6]:port
+        let (ip, after) = inner.split_once(']')?;
+        ip.parse::<std::net::Ipv6Addr>().ok()?;
+        let port = match after {
+            "" => None,
+            _ => Some(after.strip_prefix(':')?),
+        };
+        (&authority[..ip.len() + 2], port)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if let Some(port) = port
+        && !port.parse::<u16>().is_ok_and(|p| p >= 1)
+    {
+        return None;
+    }
+    let valid_name = host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        });
+    (host.starts_with('[') || valid_name).then_some(host)
 }
 
 async fn persist(path: &Path, settings: &Settings) -> Result<()> {

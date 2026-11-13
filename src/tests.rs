@@ -53,6 +53,10 @@ async fn state_in(dir: &std::path::Path) -> AppState {
         settings: SettingsStore::with_values(dir.join("admin/settings.json"), defaults()),
         files: FileStore::load(dir.join("storage")).await.unwrap(),
         requests: RequestStore::load(dir.join("storage/requests.json")).await.unwrap(),
+        login_throttle: Default::default(),
+        request_throttle: Default::default(),
+        tls_status: Default::default(),
+        restart: Default::default(),
     }
 }
 
@@ -79,6 +83,7 @@ macro_rules! test_app {
     ($state:expr) => {
         test::init_service(
             App::new()
+                .wrap(actix_web::middleware::from_fn(crate::redirect_plain_http))
                 .wrap(security_headers())
                 .app_data(web::Data::new($state))
                 .configure(|cfg| configure_routes(cfg, &test_session_settings())),
@@ -115,6 +120,7 @@ async fn content_is_served_with_sandbox_csp_and_nosniff() {
     let headers = response.headers();
     assert_eq!(headers.get("content-security-policy").unwrap(), CONTENT_CSP);
     assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "text/plain; charset=utf-8");
 }
 
 #[actix_web::test]
@@ -1520,4 +1526,196 @@ async fn invalid_requests_and_unknown_links_are_refused() {
     let unknown = uuid::Uuid::new_v4();
     let response = test::call_service(&app, request_upload(&unknown.to_string(), "name=a.txt", b"a").to_request()).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------- abuse limits and HTTPS
+
+fn login_from(ip: &str, password: &str) -> TestRequest {
+    TestRequest::post()
+        .uri("/api/admin/login")
+        .peer_addr(peer(ip))
+        .set_json(json!({ "username": ADMIN_USER, "password": password }))
+}
+
+#[actix_web::test]
+async fn wrong_passwords_lock_the_client_out() {
+    let app = test_app!(test_state().await);
+    admin_setup!(&app);
+    let max = defaults().max_login_failures;
+    for attempt in 1..max {
+        let response = test::call_service(&app, login_from("192.0.2.80", "wrong password").to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "attempt {attempt}");
+    }
+    // The attempt that reaches the limit is refused with 429, and so is the right password.
+    let response = test::call_service(&app, login_from("192.0.2.80", "wrong password").to_request()).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let response = test::call_service(&app, login_from("192.0.2.80", ADMIN_PASSWORD).to_request()).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: i64 = response.headers().get(header::RETRY_AFTER).unwrap().to_str().unwrap().parse().unwrap();
+    assert!(retry > 0 && retry <= i64::from(defaults().login_lockout_minutes) * 60);
+
+    // Another client is not affected, and a success clears its own count.
+    let response = test::call_service(&app, login_from("198.51.100.9", ADMIN_PASSWORD).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // IPv6 clients in the same /64 share one count.
+    for attempt in 1..max {
+        let ip = format!("2001:db8:5:6::{attempt:x}");
+        let response = test::call_service(&app, login_from(&ip, "wrong password").to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = test::call_service(&app, login_from("2001:db8:5:6::ff", "wrong password").to_request()).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[actix_web::test]
+async fn password_checks_behind_a_session_count_too() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let (_, id, _) = upload_encrypted!(&app, &cookie, b"secret");
+    let reveal = |password: &str| {
+        admin_post(&format!("/api/admin/files/{id}/key"), json!({ "password": password }))
+            .cookie(cookie.clone())
+            .to_request()
+    };
+    let max = defaults().max_login_failures;
+    for _ in 1..max {
+        assert_eq!(test::call_service(&app, reveal("wrong password")).await.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(test::call_service(&app, reveal("wrong password")).await.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(test::call_service(&app, reveal(ADMIN_PASSWORD)).await.status(), StatusCode::TOO_MANY_REQUESTS);
+    let check = admin_post("/api/admin/received/check", json!({ "password": ADMIN_PASSWORD })).cookie(cookie.clone());
+    assert_eq!(test::call_service(&app, check.to_request()).await.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[actix_web::test]
+async fn request_uploads_are_limited_per_client_and_links_can_expire() {
+    let state = test_state().await;
+    let limited = Settings { max_request_uploads_per_ip_per_hour: 2, ..defaults() };
+    state.settings.update(limited).await.unwrap();
+    let app = test_app!(state);
+    let cookie = admin_setup!(&app);
+    let id = new_request!(&app, &cookie, json!({ "title": "Many", "max_file_size_bytes": 100 }));
+    for _ in 0..2 {
+        let response = test::call_service(&app, request_upload(&id, "name=a.txt", b"a").to_request()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+    let response = test::call_service(&app, request_upload(&id, "name=a.txt", b"a").to_request()).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(response.headers().get(header::RETRY_AFTER).is_some());
+    let other = TestRequest::post()
+        .uri(&format!("/api/requests/{id}/files?name=b.txt"))
+        .peer_addr(peer("203.0.113.4"))
+        .set_payload(&b"b"[..]);
+    assert_eq!(test::call_service(&app, other.to_request()).await.status(), StatusCode::CREATED);
+
+    let expiring = new_request!(
+        &app,
+        &cookie,
+        json!({ "title": "Soon", "max_file_size_bytes": 100, "expires_in_minutes": 60 })
+    );
+    let info: Value = test::call_and_read_body_json(
+        &app,
+        TestRequest::get().uri(&format!("/api/requests/{expiring}")).to_request(),
+    )
+    .await;
+    assert!(info["expires_at"].as_i64().unwrap() > chrono::Utc::now().timestamp_millis());
+    let invalid = create_request(&cookie, json!({ "title": "x", "max_file_size_bytes": 10, "expires_in_minutes": 0 }));
+    assert_eq!(test::call_service(&app, invalid.to_request()).await.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn plain_http_redirects_to_https_while_tls_runs() {
+    let mut state = test_state().await;
+    let request = || TestRequest::get().uri("/files?tab=1").insert_header((header::HOST, "192.168.1.5:8080"));
+
+    // TLS off: served normally.
+    let app = test_app!(state.clone());
+    assert_eq!(test::call_service(&app, request().to_request()).await.status(), StatusCode::OK);
+
+    state.tls_status = std::sync::Arc::new(crate::tls::TlsStatus {
+        active: true,
+        https_port: Some(8443),
+        ..Default::default()
+    });
+    let app = test_app!(state);
+    let response = test::call_service(&app, request().to_request()).await;
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(response.headers().get(header::LOCATION).unwrap(), "https://192.168.1.5:8443/files?tab=1");
+}
+
+#[actix_web::test]
+async fn https_settings_are_validated_and_reported() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    for (changes, field) in [
+        (json!({ "public_url": "share.example.com" }), "public_url"),
+        (json!({ "public_url": "https://share.example.com/path" }), "public_url"),
+        (json!({ "public_url": "ftp://share.example.com" }), "public_url"),
+        (json!({ "tls_mode": "files" }), "tls_cert_path"),
+        (json!({ "tls_mode": "self_signed", "https_port": 8080 }), "https_port"),
+        (json!({ "tls_mode": "sometimes" }), "tls_mode"),
+        (json!({ "max_login_failures": 0 }), "max_login_failures"),
+    ] {
+        let response = test::call_service(&app, admin_put_settings(&cookie, settings_with(changes.clone())).to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{changes}");
+        let body: Value = test::read_body_json(response).await;
+        let fields: Vec<&str> = body["fields"].as_array().unwrap().iter().map(|f| f["field"].as_str().unwrap()).collect();
+        assert!(fields.contains(&field), "{changes}: {fields:?}");
+    }
+
+    let good = settings_with(json!({
+        "public_url": "https://share.example.com:8443/",
+        "tls_mode": "self_signed",
+        "https_port": 8443,
+    }));
+    let saved: Value = test::call_and_read_body_json(&app, admin_put_settings(&cookie, good).to_request()).await;
+    assert_eq!(saved["current"]["tls_mode"], "self_signed");
+    let pending = saved["restart_pending"].as_array().unwrap();
+    assert!(pending.contains(&json!("tls_mode")));
+    assert!(!pending.contains(&json!("public_url")));
+    assert_eq!(saved["tls"]["active"], false);
+}
+
+#[actix_web::test]
+async fn request_total_size_caps_all_files_together() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let id = new_request!(&app, &cookie, json!({ "title": "Small", "max_total_bytes": 10, "max_file_size_bytes": 8 }));
+    let info: Value = test::call_and_read_body_json(&app, TestRequest::get().uri(&format!("/api/requests/{id}")).to_request()).await;
+    assert_eq!(info["max_total_bytes"], 10);
+    assert_eq!(info["bytes_left"], 10);
+    assert_eq!(info["max_file_size_bytes"], 8);
+
+    let too_big = test::call_service(&app, request_upload(&id, "name=a.txt", b"123456789").to_request()).await;
+    assert_eq!(too_big.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let ok = test::call_service(&app, request_upload(&id, "name=a.txt", b"123456").to_request()).await;
+    assert_eq!(ok.status(), StatusCode::CREATED);
+    let over = test::call_service(&app, request_upload(&id, "name=b.txt", b"12345").to_request()).await;
+    assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = test::read_body_json(over).await;
+    assert_eq!(body["bytes_left"], 4);
+    let fits = test::call_service(&app, request_upload(&id, "name=c.txt", b"1234").to_request()).await;
+    assert_eq!(fits.status(), StatusCode::CREATED);
+    let full = test::call_service(&app, request_upload(&id, "name=d.txt", b"1").to_request()).await;
+    assert_eq!(full.status(), StatusCode::GONE);
+
+    let bad = create_request(&cookie, json!({ "title": "x", "max_total_bytes": 10, "max_file_size_bytes": 11 }));
+    assert_eq!(test::call_service(&app, bad.to_request()).await.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn restart_button_needs_a_session_and_raises_the_signal() {
+    let state = test_state().await;
+    let signal = state.restart.clone();
+    let app = test_app!(state);
+    let anonymous = TestRequest::post().uri("/api/admin/restart").to_request();
+    assert_eq!(test::call_service(&app, anonymous).await.status(), StatusCode::UNAUTHORIZED);
+    assert!(!signal.is_requested());
+
+    let cookie = admin_setup!(&app);
+    let request = TestRequest::post().uri("/api/admin/restart").cookie(cookie).to_request();
+    assert_eq!(test::call_service(&app, request).await.status(), StatusCode::ACCEPTED);
+    assert!(signal.is_requested());
+    // The wake-up is kept for `main`, which may start waiting later.
+    tokio::time::timeout(std::time::Duration::from_secs(1), signal.wait()).await.unwrap();
 }

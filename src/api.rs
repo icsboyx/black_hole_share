@@ -14,6 +14,7 @@ use crate::{
     },
     logs::LogEventType,
     requests::{SlotError, clean_uploader},
+    throttle::{client_key, retry_after_secs},
 };
 
 /// Room for the JSON fields around the content (`duration`, `content_type`, ...).
@@ -197,6 +198,11 @@ async fn api_get_asset(
 
     match app_state.assets.get_asset(&uuid).await {
         None => Ok(HttpResponse::NotFound().body("Asset not found")),
+        // Uploaded text is UTF-8 (it arrives in JSON); without a charset a browser may guess.
+        Some(asset) if asset.mime() == "text/plain" => Ok(HttpResponse::Ok()
+            .content_type("text/plain; charset=utf-8")
+            .insert_header(("Content-Security-Policy", CONTENT_CSP))
+            .body(asset.content())),
         Some(asset) => Ok(HttpResponse::Ok()
             .content_type(asset.mime())
             .insert_header(("Content-Security-Policy", CONTENT_CSP))
@@ -484,6 +490,9 @@ async fn api_request_info(
     let Some(request) = app_state.requests.get(&id).await else {
         return Ok(request_not_found_response());
     };
+    if request.is_expired(chrono::Utc::now().timestamp_millis()) {
+        return Ok(request_expired_response());
+    }
     // The settings may have lowered the per-file limit since the request was created.
     let max_file_size = request
         .max_file_size_bytes
@@ -494,9 +503,12 @@ async fn api_request_info(
             "title": request.title,
             "message": request.message,
             "max_file_size_bytes": max_file_size,
+            "max_total_bytes": request.max_total_bytes,
+            "bytes_left": request.bytes_left(),
             "extensions": request.extensions,
             "files_left": request.files_left(),
             "require_name": request.require_name,
+            "expires_at": request.expires_at,
         })))
 }
 
@@ -504,6 +516,10 @@ async fn api_request_info(
 struct RequestUploadQuery {
     name: String,
     uploader: Option<String>,
+}
+
+fn request_expired_response() -> HttpResponse {
+    HttpResponse::Gone().json(json!({ "error": "This upload link has expired" }))
 }
 
 fn request_not_found_response() -> HttpResponse {
@@ -524,16 +540,55 @@ async fn api_request_upload(
     let Some(id) = parse_file_id(&path.into_inner()) else {
         return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid request id" })));
     };
-    let slot = match app_state.requests.begin_upload(&id).await {
+    let Some(length) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(
+            HttpResponse::LengthRequired().json(json!({ "error": "Content-Length is required" }))
+        );
+    };
+    // The place is taken for the declared size, so uploads running at the same time
+    // cannot go over the request's total together.
+    let slot = match app_state.requests.begin_upload(&id, length).await {
         Ok(slot) => slot,
         Err(SlotError::NotFound) => return Ok(request_not_found_response()),
+        Err(SlotError::Expired) => return Ok(request_expired_response()),
         Err(SlotError::Full) => {
             return Ok(HttpResponse::Gone().json(
                 json!({ "error": "This upload link has received all the files it accepts" }),
             ));
         }
+        Err(SlotError::FileTooLarge) => {
+            return Ok(HttpResponse::PayloadTooLarge()
+                .json(json!({ "error": "The file is larger than this link accepts" })));
+        }
+        Err(SlotError::TotalExceeded { bytes_left }) => {
+            return Ok(HttpResponse::PayloadTooLarge().json(json!({
+                "error": format!("Not enough space left on this link: {bytes_left} bytes left"),
+                "bytes_left": bytes_left,
+            })));
+        }
     };
     let request = slot.request().clone();
+
+    // A leaked link must not let one client fill the storage budget alone.
+    let client = client_key(&crate::client_ip(&req).unwrap_or_else(|| "-".to_string()));
+    let max_per_hour = app_state.settings.get().max_request_uploads_per_ip_per_hour;
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(ms_left) = app_state
+        .request_throttle
+        .allow(&client, now, max_per_hour, 3_600_000)
+    {
+        let secs = retry_after_secs(ms_left);
+        return Ok(HttpResponse::TooManyRequests()
+            .insert_header((header::RETRY_AFTER, secs.to_string()))
+            .json(json!({
+                "error": format!("Too many files from your address. Try again in {} minute(s).", (secs + 59) / 60)
+            })));
+    }
 
     let query = match web::Query::<RequestUploadQuery>::from_query(req.query_string()) {
         Ok(query) => query.into_inner(),
@@ -553,16 +608,6 @@ async fn api_request_upload(
             "error": format!("This file type is not accepted. Allowed: {}", request.extensions.join(", "))
         })));
     }
-    let Some(length) = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-    else {
-        return Ok(
-            HttpResponse::LengthRequired().json(json!({ "error": "Content-Length is required" }))
-        );
-    };
     let settings = app_state.settings.get();
     let max_file_size = request
         .max_file_size_bytes

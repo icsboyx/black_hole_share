@@ -141,22 +141,44 @@
             <div class="input-wrap"><textarea id="requestMessage" rows="3" maxlength="1000" placeholder="Optional: what to send and why"></textarea></div>
           </div>
           <div class="field">
+            <label class="field-label" for="requestTotal">Total size</label>
+            <div class="input-wrap">
+              <input id="requestTotal" type="number" min="1" step="any" value="100" inputmode="decimal" />
+              <select id="requestTotalUnit" aria-label="Size unit">
+                <option value="1048576" selected>MB</option>
+                <option value="1073741824">GB</option>
+              </select>
+            </div>
+            <div class="field-help" id="requestTotalHelp">All files together</div>
+          </div>
+          <div class="field">
             <label class="field-label" for="requestMaxSize">Largest file</label>
             <div class="input-wrap">
-              <input id="requestMaxSize" type="number" min="1" step="1" value="100" inputmode="numeric" />
+              <input id="requestMaxSize" type="number" min="1" step="any" placeholder="Same as the total" inputmode="decimal" />
               <select id="requestMaxSizeUnit" aria-label="Size unit">
                 <option value="1048576" selected>MB</option>
                 <option value="1073741824">GB</option>
               </select>
             </div>
-            <div class="field-help" id="requestMaxSizeHelp">Per file</div>
+            <div class="field-help" id="requestMaxSizeHelp">Per file, never above the total</div>
           </div>
           <div class="field">
             <label class="field-label" for="requestMaxFiles">Max files</label>
             <div class="input-wrap"><input id="requestMaxFiles" type="number" min="1" step="1" placeholder="No limit" inputmode="numeric" /></div>
             <div class="field-help">The link closes after the last one</div>
           </div>
-          <div class="field wide">
+          <div class="field">
+            <label class="field-label" for="requestExpires">Open for</label>
+            <div class="input-wrap">
+              <input id="requestExpires" type="number" min="1" step="1" placeholder="No expiry" inputmode="numeric" />
+              <select id="requestExpiresUnit" aria-label="Duration unit">
+                <option value="60">hours</option>
+                <option value="1440" selected>days</option>
+              </select>
+            </div>
+            <div class="field-help">Empty: until it is full or you close it</div>
+          </div>
+          <div class="field">
             <label class="field-label" for="requestExtensions">File types</label>
             <div class="input-wrap"><input id="requestExtensions" type="text" spellcheck="false" placeholder="e.g. pdf, jpg, png" /></div>
             <div class="field-help">Extensions separated by commas; empty accepts any type. Only the file name is checked, not its content.</div>
@@ -249,8 +271,15 @@
     let selectedFile = null;
     let uploadRequest = null;
 
+    // Links use the public URL from the settings when set: the address in the browser may be
+    // a LAN address that nobody outside can reach.
+    function linkBase() {
+      const base = settings && settings.public_url ? settings.public_url.replace(/\/+$/, "") : "";
+      return base || location.origin;
+    }
+
     function fileLink(item) {
-      return `${location.origin}${item.link}`;
+      return `${linkBase()}${item.link}`;
     }
 
     // A button that copies `text` and says so on itself for a moment.
@@ -632,14 +661,16 @@
     // ------------------------------------------------------------------ requests
 
     function requestLink(item) {
-      return `${location.origin}${item.link}`;
+      return `${linkBase()}${item.link}`;
     }
 
     // Reads the request form. Ranges are checked again by the server.
     function readRequestForm() {
       const title = document.getElementById("requestTitle").value.trim();
       const message = document.getElementById("requestMessage").value.trim();
-      const size = Number(document.getElementById("requestMaxSize").value);
+      const total = Number(document.getElementById("requestTotal").value);
+      const totalUnit = Number(document.getElementById("requestTotalUnit").value);
+      const sizeRaw = document.getElementById("requestMaxSize").value.trim();
       const unit = Number(document.getElementById("requestMaxSizeUnit").value);
       const maxRaw = document.getElementById("requestMaxFiles").value.trim();
       const extensions = document.getElementById("requestExtensions").value
@@ -647,10 +678,31 @@
         .map((ext) => ext.trim())
         .filter((ext) => ext !== "");
       if (!title) return { error: "Enter a title." };
-      if (!(size > 0)) return { error: "The largest file must be more than 0." };
-      const maxFileSize = Math.round(size * unit);
-      if (settings && maxFileSize > settings.max_file_size_bytes) {
-        return { error: `The largest file can be at most ${formatBytes(settings.max_file_size_bytes)} (the per-file limit in the settings).` };
+      if (!(total > 0)) return { error: "The total size must be more than 0." };
+      const maxTotal = Math.round(total * totalUnit);
+      if (settings && maxTotal > settings.max_files_total_bytes) {
+        return { error: `The total size can be at most ${formatBytes(settings.max_files_total_bytes)} (the disk budget in the settings).` };
+      }
+      let maxFileSize = null;
+      if (sizeRaw !== "") {
+        const size = Number(sizeRaw);
+        if (!(size > 0)) return { error: "The largest file must be more than 0." };
+        maxFileSize = Math.round(size * unit);
+        if (maxFileSize > maxTotal) return { error: "The largest file cannot be above the total size." };
+      }
+      const perFile = maxFileSize === null ? maxTotal : maxFileSize;
+      if (settings && perFile > settings.max_file_size_bytes) {
+        return {
+          error: `Files can be at most ${formatBytes(settings.max_file_size_bytes)} each (the per-file limit in the settings): ` +
+            "set a smaller largest file.",
+        };
+      }
+      const expiresRaw = document.getElementById("requestExpires").value.trim();
+      let expiresIn = null;
+      if (expiresRaw !== "") {
+        const amount = Number(expiresRaw);
+        if (!Number.isInteger(amount) || amount < 1) return { error: "Open for must be a whole number of at least 1." };
+        expiresIn = amount * Number(document.getElementById("requestExpiresUnit").value);
       }
       let maxFiles = null;
       if (maxRaw !== "") {
@@ -661,10 +713,12 @@
         body: {
           title,
           message,
+          max_total_bytes: maxTotal,
           max_file_size_bytes: maxFileSize,
           extensions,
           max_files: maxFiles,
           require_name: document.getElementById("requestRequireName").checked,
+          expires_in_minutes: expiresIn,
         },
       };
     }
@@ -718,13 +772,20 @@
         const closeBtn = el("button", { className: "btn-ghost danger", type: "button" }, "Close");
         closeBtn.addEventListener("click", () => closeRequest(item));
         const received = item.max_files === null ? `${item.uploads}` : `${item.uploads} / ${item.max_files}`;
-        const state = item.files_left === 0 ? "Full" : "Open";
+        const now = Date.now();
+        let state = "Open";
+        if (item.files_left === 0 || (item.max_total_bytes !== null && item.received_bytes >= item.max_total_bytes)) state = "Full";
+        else if (item.expires_at !== null && now >= item.expires_at) state = "Expired";
+        else if (item.expires_at !== null) state = `Open, ${formatDuration(item.expires_at - now)} left`;
         return el(
           "tr",
           {},
           el("td", { className: "name", title: item.title }, item.title),
           el("td", {}, received),
-          el("td", {}, formatBytes(item.max_file_size_bytes)),
+          el("td", { title: `Largest file ${formatBytes(item.max_file_size_bytes)}` },
+            item.max_total_bytes === null
+              ? formatBytes(item.received_bytes)
+              : `${formatBytes(item.received_bytes)} / ${formatBytes(item.max_total_bytes)}`),
           el("td", { className: "name narrow", title: requestTypes(item) }, requestTypes(item)),
           el("td", {}, state),
           el("td", {}, el("div", { className: "row-actions" }, copyButton(requestLink(item), "Copy link"), closeBtn))
@@ -733,7 +794,7 @@
       document.getElementById("requestsSummary").textContent =
         requests.length === 0 ? "No request is open." : `${requests.length} request link(s).`;
       document.getElementById("requestsTable").replaceChildren(
-        table(["Title", "Files", "Largest", "Types", "State", ""], rows)
+        table(["Title", "Files", "Used", "Types", "State", ""], rows)
       );
     }
 
@@ -873,8 +934,10 @@
       }
       settings = settingsResult.data.current;
       renderFileLimits(stats.data);
+      document.getElementById("requestTotalHelp").textContent =
+        `All files together, up to ${formatBytes(settings.max_files_total_bytes)} (disk budget)`;
       document.getElementById("requestMaxSizeHelp").textContent =
-        `Per file, up to ${formatBytes(settings.max_file_size_bytes)} (settings)`;
+        `Empty: same as the total. Never above it, nor ${formatBytes(settings.max_file_size_bytes)} (settings)`;
       await Promise.all([loadFiles(), loadRequests(), loadReceived()]);
     }
 

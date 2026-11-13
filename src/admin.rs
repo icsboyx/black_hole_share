@@ -28,12 +28,21 @@ use crate::{
     logs::{LogEventType, LogLimits},
     requests::{CreateError, NewRequest, UploadRequest},
     settings::{FieldError, Settings, UpdateError},
+    throttle::{client_key, retry_after_secs},
 };
 
 pub const SESSION_COOKIE_NAME: &str = "bhs_admin";
 
 /// Settings read only at startup: a new value needs a restart.
-const RESTART_FIELDS: &[&str] = &["bind_addr", "bind_port", "admin_session_max_age_minutes"];
+const RESTART_FIELDS: &[&str] = &[
+    "bind_addr",
+    "bind_port",
+    "admin_session_max_age_minutes",
+    "tls_mode",
+    "tls_cert_path",
+    "tls_key_path",
+    "https_port",
+];
 
 const SESSION_USER: &str = "admin_user";
 const SESSION_VERSION: &str = "admin_version";
@@ -82,6 +91,7 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
             .service(upload_file)
             .service(list_files)
             .service(reveal_file_key)
+            .service(restart_server)
             .service(create_request)
             .service(list_requests)
             .service(delete_request)
@@ -115,6 +125,7 @@ async fn status(
         "configured": app_state.admin.is_configured().await,
         "authenticated": username.is_some(),
         "username": username,
+        "started_at": *crate::STARTED_AT,
     })))
 }
 
@@ -148,8 +159,12 @@ async fn login(
     body: web::Json<CredentialsRequest>,
     app_state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
+    if let Some(response) = locked_out(&app_state, &req) {
+        return Ok(response);
+    }
     match app_state.admin.verify(&body.username, &body.password).await {
         Ok(version) => {
+            right_password(&app_state, &req);
             start_session(&session, &body.username, version)?;
             log_admin(
                 &app_state,
@@ -169,6 +184,9 @@ async fn login(
                     json!({ "username": body.username }),
                 )
                 .await;
+                if let Some(response) = wrong_password(&app_state, &req) {
+                    return Ok(response);
+                }
             }
             Ok(auth_error_response(e))
         }
@@ -202,12 +220,16 @@ async fn change_password(
     app_state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
     let username = require_admin(&session, &app_state).await?;
+    if let Some(response) = locked_out(&app_state, &req) {
+        return Ok(response);
+    }
     match app_state
         .admin
         .change_password(&body.current_password, &body.new_password)
         .await
     {
         Ok(version) => {
+            right_password(&app_state, &req);
             // Every other session now carries an old version and is rejected;
             // this one is reissued so the admin who changed it stays logged in.
             start_session(&session, &username, version)?;
@@ -221,6 +243,9 @@ async fn change_password(
             Ok(HttpResponse::NoContent().finish())
         }
         Err(AuthError::InvalidCredentials) => {
+            if let Some(response) = wrong_password(&app_state, &req) {
+                return Ok(response);
+            }
             Ok(HttpResponse::Forbidden().json(json!({ "error": "Current password is incorrect" })))
         }
         Err(e) => Ok(auth_error_response(e)),
@@ -532,8 +557,14 @@ async fn reveal_file_key(
             HttpResponse::BadRequest().json(json!({ "error": "This file is not encrypted" }))
         );
     };
+    if let Some(response) = locked_out(&app_state, &req) {
+        return Ok(response);
+    }
     let secret = match app_state.admin.unlock(&body.password).await {
-        Ok(secret) => secret,
+        Ok(secret) => {
+            right_password(&app_state, &req);
+            secret
+        }
         Err(AuthError::InvalidCredentials) => {
             log_admin(
                 &app_state,
@@ -542,6 +573,9 @@ async fn reveal_file_key(
                 json!({ "username": username, "file_id": file.id }),
             )
             .await;
+            if let Some(response) = wrong_password(&app_state, &req) {
+                return Ok(response);
+            }
             return Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })));
         }
         Err(e) => return Ok(auth_error_response(e)),
@@ -563,6 +597,26 @@ async fn reveal_file_key(
                 .json(json!({ "error": "Cannot read the file key" })))
         }
     }
+}
+
+/// Restarts the server, to apply settings read at startup. The response is sent before the
+/// server stops: the stop waits for requests in progress.
+#[post("/restart")]
+async fn restart_server(
+    req: HttpRequest,
+    session: Session,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    log_admin(
+        &app_state,
+        &req,
+        "server_restart",
+        json!({ "username": username, "restart_pending": settings_response(&app_state)["restart_pending"] }),
+    )
+    .await;
+    app_state.restart.request();
+    Ok(HttpResponse::Accepted().json(json!({ "restarting": true })))
 }
 
 #[derive(Serialize)]
@@ -591,8 +645,16 @@ async fn create_request(
     app_state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
     let username = require_admin(&session, &app_state).await?;
-    let limit = app_state.settings.get().max_file_size_bytes;
-    match app_state.requests.create(body.into_inner(), limit).await {
+    let settings = app_state.settings.get();
+    match app_state
+        .requests
+        .create(
+            body.into_inner(),
+            settings.max_file_size_bytes,
+            settings.max_files_total_bytes,
+        )
+        .await
+    {
         Ok(request) => {
             log_admin(
                 &app_state,
@@ -711,14 +773,24 @@ struct PasswordForm {
 /// instead of an error page.
 #[post("/received/check")]
 async fn check_received_password(
+    req: HttpRequest,
     session: Session,
     body: web::Json<PasswordForm>,
     app_state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
     require_admin(&session, &app_state).await?;
+    if let Some(response) = locked_out(&app_state, &req) {
+        return Ok(response);
+    }
     match app_state.admin.unlock(&body.password).await {
-        Ok(_) => Ok(HttpResponse::NoContent().finish()),
+        Ok(_) => {
+            right_password(&app_state, &req);
+            Ok(HttpResponse::NoContent().finish())
+        }
         Err(AuthError::InvalidCredentials) => {
+            if let Some(response) = wrong_password(&app_state, &req) {
+                return Ok(response);
+            }
             Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })))
         }
         Err(e) => Ok(auth_error_response(e)),
@@ -750,9 +822,18 @@ async fn download_received(
     else {
         return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
     };
+    if let Some(response) = locked_out(&app_state, &req) {
+        return Ok(response);
+    }
     let secret = match app_state.admin.unlock(&form.password).await {
-        Ok(secret) => secret,
+        Ok(secret) => {
+            right_password(&app_state, &req);
+            secret
+        }
         Err(AuthError::InvalidCredentials) => {
+            if let Some(response) = wrong_password(&app_state, &req) {
+                return Ok(response);
+            }
             return Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })));
         }
         Err(e) => return Ok(auth_error_response(e)),
@@ -964,6 +1045,7 @@ fn settings_response(app_state: &AppState) -> Value {
         "defaults": settings_value(&Settings::default()),
         "restart_fields": RESTART_FIELDS,
         "restart_pending": restart_pending,
+        "tls": *app_state.tls_status,
     })
 }
 
@@ -1066,6 +1148,57 @@ fn auth_error_response(error: AuthError) -> HttpResponse {
             HttpResponse::InternalServerError().json(json!({ "error": "Internal error" }))
         }
     }
+}
+
+// ------------------------------------------------------------------ wrong passwords
+
+/// Wrong passwords are counted per client (IPv6 per /64) on every route that checks the
+/// admin password; after `max_login_failures` the client waits `login_lockout_minutes`.
+fn password_client(req: &HttpRequest) -> String {
+    client_key(&crate::client_ip(req).unwrap_or_else(|| "-".to_string()))
+}
+
+fn too_many_attempts(ms_left: i64) -> HttpResponse {
+    let secs = retry_after_secs(ms_left);
+    let minutes = (secs + 59) / 60;
+    HttpResponse::TooManyRequests()
+        .insert_header((actix_web::http::header::RETRY_AFTER, secs.to_string()))
+        .json(json!({
+            "error": format!("Too many wrong passwords. Try again in {minutes} minute(s)."),
+            "retry_after_secs": secs,
+        }))
+}
+
+/// `Some(429)` while this client is locked out: the password is not even checked.
+fn locked_out(app_state: &AppState, req: &HttpRequest) -> Option<HttpResponse> {
+    let now = Utc::now().timestamp_millis();
+    app_state
+        .login_throttle
+        .check(&password_client(req), now)
+        .err()
+        .map(too_many_attempts)
+}
+
+/// Counts a wrong password. `Some(429)` when this one reached the limit.
+fn wrong_password(app_state: &AppState, req: &HttpRequest) -> Option<HttpResponse> {
+    let settings = app_state.settings.get();
+    let now = Utc::now().timestamp_millis();
+    let window = i64::from(settings.login_lockout_minutes) * 60_000;
+    let client = password_client(req);
+    let result = app_state
+        .login_throttle
+        .record(&client, now, settings.max_login_failures, window);
+    match result {
+        Ok(()) => None,
+        Err(ms_left) => {
+            eprintln!("Too many wrong admin passwords from {client}; locked out");
+            Some(too_many_attempts(ms_left))
+        }
+    }
+}
+
+fn right_password(app_state: &AppState, req: &HttpRequest) {
+    app_state.login_throttle.reset(&password_client(req));
 }
 
 async fn log_admin(app_state: &AppState, req: &HttpRequest, action: &str, details: Value) {
