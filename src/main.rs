@@ -1,5 +1,6 @@
 mod admin;
 mod crypto;
+mod requests;
 mod api;
 mod auth;
 mod data_mgt;
@@ -34,6 +35,7 @@ pub static ADMIN_CREDENTIALS_FILE: &str = "data/admin/credentials.json";
 pub static SESSION_KEY_FILE: &str = "data/admin/session.key";
 pub static SETTINGS_FILE: &str = "data/admin/settings.json";
 pub static STORAGE_DIR: &str = "data/storage/";
+pub static REQUESTS_FILE: &str = "data/storage/requests.json";
 pub static LOG_FILE_NAME: &str = "log.txt";
 // Limits and bind address now live in SETTINGS_FILE; these variables are no longer read.
 static IGNORED_ENV_VARS: &[&str] = &["BIND_ADDR", "BIND_PORT", "TRUSTED_PROXIES"];
@@ -83,7 +85,7 @@ pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
 use crate::{
     api::{
         api_file_check_key, api_file_download, api_file_download_with_key, api_file_info,
-        api_get_asset, api_limits, api_stats, api_upload,
+        api_get_asset, api_limits, api_request_info, api_request_upload, api_stats, api_upload,
     },
     data_mgt::AppState,
     logs::{LogEventType, LogFile},
@@ -173,6 +175,21 @@ async fn file_page(
     get_static_file(path).await
 }
 
+/// The page where someone uploads files for an upload request.
+#[get("/r/{id}")]
+async fn request_page(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "request.html");
+    app_state
+        .log_file
+        .write_event(LogEventType::HttpRequest(req.into()))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
+    get_static_file(path).await
+}
+
 #[route("/{tail:.*}", method = "GET", method = "POST")]
 async fn catch_all(
     req: HttpRequest,
@@ -231,6 +248,7 @@ async fn main() -> Result<()> {
         admin,
         settings,
         files: files::FileStore::load(STORAGE_DIR).await?,
+        requests: requests::RequestStore::load(REQUESTS_FILE).await?,
     };
 
     let bind = (startup.bind_addr, startup.bind_port);
@@ -274,6 +292,9 @@ fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::Sess
         .service(view_asset)
         .service(files_page)
         .service(file_page)
+        .service(request_page)
+        .service(api_request_info)
+        .service(api_request_upload)
         .service(api_file_info)
         .service(api_file_download)
         .service(api_file_check_key)

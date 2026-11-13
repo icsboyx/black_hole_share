@@ -26,6 +26,7 @@ use crate::{
     data_mgt::{AppState, log_removed_assets},
     files::{FileEncryption, FileError, NewFile, SharedFile},
     logs::{LogEventType, LogLimits},
+    requests::{CreateError, NewRequest, UploadRequest},
     settings::{FieldError, Settings, UpdateError},
 };
 
@@ -81,6 +82,13 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
             .service(upload_file)
             .service(list_files)
             .service(reveal_file_key)
+            .service(create_request)
+            .service(list_requests)
+            .service(delete_request)
+            .service(list_received)
+            .service(check_received_password)
+            .service(download_received)
+            .service(delete_received)
             .service(delete_file),
     );
 }
@@ -444,6 +452,7 @@ async fn upload_file(
         duration_minutes: query.duration_minutes,
         valid_from: query.valid_from,
         max_downloads: query.max_downloads,
+        received: None,
     };
     match app_state
         .files
@@ -556,6 +565,259 @@ async fn reveal_file_key(
     }
 }
 
+#[derive(Serialize)]
+struct AdminRequestItem {
+    #[serde(flatten)]
+    request: UploadRequest,
+    files_left: Option<u32>,
+    link: String,
+}
+
+impl From<UploadRequest> for AdminRequestItem {
+    fn from(request: UploadRequest) -> Self {
+        Self {
+            files_left: request.files_left(),
+            link: format!("/r/{}", request.id),
+            request,
+        }
+    }
+}
+
+#[post("/requests")]
+async fn create_request(
+    req: HttpRequest,
+    session: Session,
+    body: web::Json<NewRequest>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let limit = app_state.settings.get().max_file_size_bytes;
+    match app_state.requests.create(body.into_inner(), limit).await {
+        Ok(request) => {
+            log_admin(
+                &app_state,
+                &req,
+                "request_created",
+                json!({ "username": username, "request_id": request.id, "title": request.title }),
+            )
+            .await;
+            Ok(HttpResponse::Created().json(AdminRequestItem::from(request)))
+        }
+        Err(CreateError::Invalid(message)) => {
+            Ok(HttpResponse::BadRequest().json(json!({ "error": message })))
+        }
+        Err(CreateError::Internal(e)) => {
+            eprintln!("Cannot create an upload request: {e:#}");
+            Ok(HttpResponse::InternalServerError()
+                .json(json!({ "error": "Cannot create the request" })))
+        }
+    }
+}
+
+#[get("/requests")]
+async fn list_requests(
+    session: Session,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    require_admin(&session, &app_state).await?;
+    let items: Vec<AdminRequestItem> = app_state
+        .requests
+        .list()
+        .await
+        .into_iter()
+        .map(AdminRequestItem::from)
+        .collect();
+    Ok(HttpResponse::Ok().json(items))
+}
+
+/// Closes a request: its link stops accepting files. Files already received stay.
+#[delete("/requests/{id}")]
+async fn delete_request(
+    req: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid request id" })));
+    };
+    match app_state.requests.remove(&id).await {
+        Ok(Some(request)) => {
+            log_admin(
+                &app_state,
+                &req,
+                "request_closed",
+                json!({ "username": username, "request_id": request.id, "title": request.title }),
+            )
+            .await;
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(json!({ "error": "Request not found" }))),
+        Err(e) => {
+            eprintln!("Cannot delete request {id}: {e:#}");
+            Ok(HttpResponse::InternalServerError().json(json!({ "error": "Delete failed" })))
+        }
+    }
+}
+
+/// A file received through a request, as the admin sees it.
+#[derive(Serialize)]
+struct ReceivedItem {
+    id: Uuid,
+    name: String,
+    size: u64,
+    received_at: i64,
+    request_id: Uuid,
+    request_title: String,
+    uploader: Option<String>,
+    ip: Option<String>,
+}
+
+#[get("/received")]
+async fn list_received(
+    session: Session,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    require_admin(&session, &app_state).await?;
+    let items: Vec<ReceivedItem> = app_state
+        .files
+        .list_received()
+        .await
+        .into_iter()
+        .filter_map(|file| {
+            let received = file.received?;
+            Some(ReceivedItem {
+                id: file.id,
+                name: file.name,
+                size: file.size,
+                received_at: file.created_at,
+                request_id: received.request_id,
+                request_title: received.request_title,
+                uploader: received.uploader,
+                ip: received.ip,
+            })
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(items))
+}
+
+#[derive(Deserialize)]
+struct PasswordForm {
+    password: String,
+}
+
+/// Checks the password before a download, so a wrong one shows a message in the page
+/// instead of an error page.
+#[post("/received/check")]
+async fn check_received_password(
+    session: Session,
+    body: web::Json<PasswordForm>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    require_admin(&session, &app_state).await?;
+    match app_state.admin.unlock(&body.password).await {
+        Ok(_) => Ok(HttpResponse::NoContent().finish()),
+        Err(AuthError::InvalidCredentials) => {
+            Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })))
+        }
+        Err(e) => Ok(auth_error_response(e)),
+    }
+}
+
+/// Downloads a received file, decrypted on the way. The password comes in a form body, so
+/// the browser can save the file straight to disk: it decrypts the admin's private key,
+/// which unwraps the file key.
+#[post("/received/{id}/download")]
+async fn download_received(
+    req: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    form: web::Form<PasswordForm>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    let Some(wrapped) = app_state
+        .files
+        .list_received()
+        .await
+        .into_iter()
+        .find(|file| file.id == id)
+        .and_then(|file| file.wrapped_key)
+    else {
+        return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
+    };
+    let secret = match app_state.admin.unlock(&form.password).await {
+        Ok(secret) => secret,
+        Err(AuthError::InvalidCredentials) => {
+            return Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })));
+        }
+        Err(e) => return Ok(auth_error_response(e)),
+    };
+    let opened = unwrap_file_key(&secret, &wrapped).map_err(|e| e.context("cannot unwrap the key"));
+    let opened = match opened {
+        Ok(key) => app_state.files.open_received(&id, &key).await,
+        Err(e) => Err(e),
+    };
+    match opened {
+        Ok(Some((file, handle, decryption))) => {
+            log_admin(
+                &app_state,
+                &req,
+                "received_downloaded",
+                json!({ "username": username, "file_id": file.id, "name": file.name }),
+            )
+            .await;
+            Ok(crate::api::attachment_response(
+                &file,
+                handle,
+                Some(decryption),
+            ))
+        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" }))),
+        Err(e) => {
+            eprintln!("Cannot open received file {id}: {e:#}");
+            Ok(
+                HttpResponse::InternalServerError()
+                    .json(json!({ "error": "Cannot read the file" })),
+            )
+        }
+    }
+}
+
+#[delete("/received/{id}")]
+async fn delete_received(
+    req: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    match app_state.files.remove(&id, true).await {
+        Ok(Some(file)) => {
+            log_admin(
+                &app_state,
+                &req,
+                "received_deleted",
+                json!({ "username": username, "file_id": file.id, "name": file.name }),
+            )
+            .await;
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" }))),
+        Err(e) => {
+            eprintln!("Cannot delete received file {id}: {e:#}");
+            Ok(HttpResponse::InternalServerError().json(json!({ "error": "Delete failed" })))
+        }
+    }
+}
+
 #[delete("/files/{id}")]
 async fn delete_file(
     req: HttpRequest,
@@ -567,7 +829,7 @@ async fn delete_file(
     let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
         return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
     };
-    match app_state.files.remove(&id).await {
+    match app_state.files.remove(&id, false).await {
         Ok(Some(file)) => {
             log_admin(
                 &app_state,

@@ -83,7 +83,7 @@ The per-IP limit is released as that client's shared items expire. Image uploads
 | `data/html/` | Static frontend pages and web assets |
 | `data/logs/` | Runtime log output |
 | `data/admin/` | Admin credentials, session key, and settings, created at runtime, never commit it |
-| `data/storage/` | Files shared by the admin (`<uuid>`) and their index (`index.json`), created at runtime |
+| `data/storage/` | Files shared by and sent to the admin (`<uuid>`), their index (`index.json`), and the upload requests (`requests.json`), created at runtime |
 
 ## Run Locally
 
@@ -208,6 +208,7 @@ bhs.example.com {
 | `GET` | `/admin` | Admin control panel (login required) |
 | `GET` | `/files` | File sharing for the admin (login required) |
 | `GET` | `/f/{id}` | Download page of a shared file |
+| `GET` | `/r/{id}` | Upload page of an upload request |
 
 Unknown paths return the error page with status `404`.
 
@@ -290,6 +291,22 @@ Downloads an encrypted file, decrypted while it is sent; the response is the sam
 
 Checks a key without downloading: `204` when it opens the file, `403` for a wrong key, `400` for a file that is not encrypted or a malformed key, `404` and `403` (opening time) as above. The download page calls it before starting the download.
 
+### Upload Requests
+
+`GET /api/requests/{id}`
+
+What the upload page of a request shows: `title`, `message`, `max_file_size_bytes` (the request's limit, or the per-file limit in the settings if lower), `extensions` (empty means any type), `files_left` (or `null` when unlimited), and `require_name`. `404` when the request does not exist or was closed.
+
+`POST /api/requests/{id}/files?name=&uploader=`
+
+Raw file bytes as the body, `Content-Length` required (`411` without it). No login: the request id is the permission. The file is encrypted for the admin as it arrives and never gets a public link.
+
+- `201` with `name` and `size`.
+- `400` for a missing name, a missing uploader name when the request requires one, or a body that does not match its length.
+- `410` when the request has received all the files it accepts, `404` when it does not exist.
+- `413` over the request's size limit, `415` for an extension the request does not accept, `507` when the storage budget is full.
+- `503` while the admin has no encryption keys yet (they are created at the admin's next login).
+
 ### Stats
 
 `GET /api/stats`
@@ -355,6 +372,7 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 
 - Drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time
 - Upload with progress, speed, and cancel
+- Tabs: **Share** (your files with a public link), **Requests** (links that let others send you files), **Received** (what they sent)
 - Optional encryption with a new random key per file; the key is shown once after the upload (hidden behind dots, with Show and Copy) and can be shown again later with the admin password
 - List of shared files with downloads, status, key, copy link, and delete
 - Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
@@ -371,6 +389,16 @@ Encryption is chosen per file at upload time. It happens on the server: the down
 - Changing the password re-encrypts the private key; keys of files shared before still open. Credentials created before encryption existed get their key pair at the next login.
 - **If the credentials file is deleted** (password reset), stored keys can no longer be shown; downloaders who already have a key can still download.
 - The server sees the content and the key while it encrypts and decrypts. Over plain HTTP the key travels unencrypted on the network: use HTTPS.
+
+### Upload requests
+
+A request is a link (`/r/{id}`) that lets someone without an account send you files.
+
+- You set a title, an optional message, the largest file, the accepted extensions (empty: any), an optional number of files, and whether the uploader's name is required. The link has no expiry: it stays open until it has received its number of files or you close it.
+- The extension is checked on the file name only. It is what the uploader called the file, not proof of its content.
+- Every received file is encrypted on arrival for your X25519 public key (the same key pair as for [encrypted files](#encrypted-files)): nothing on disk can be read without your password. Downloading one asks for the password; the file is decrypted while it is sent.
+- Received files never have a public link and do not expire; they count against `max_files_total_bytes` until you delete them. Closing a request keeps the files it received.
+- Each received file records the request, the uploader's name, and the uploader's IP address.
 
 ### Admin API
 
@@ -391,6 +419,13 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `GET` | `/files` | yes | Shared files that have not expired, with downloads, `encrypted`, and `link` |
 | `POST` | `/files/{id}/key` | yes | `{ "password" }`; `200` with the `key` of an encrypted file, `403` if the password is wrong, `400` if the file is not encrypted, `404` if missing. Logged |
 | `DELETE` | `/files/{id}` | yes | Delete a shared file now; `204`, `400` for an invalid id, `404` if missing |
+| `POST` | `/requests` | yes | `{ "title", "message", "max_file_size_bytes", "extensions": [], "max_files", "require_name" }`; `201` with the request, `files_left`, and its `link`; `400` with an `error` when invalid (`max_file_size_bytes` may not exceed the per-file limit) |
+| `GET` | `/requests` | yes | Upload requests, newest first, with `uploads`, `files_left`, and `link` |
+| `DELETE` | `/requests/{id}` | yes | Close a request: its link stops accepting files; received files stay. `204`, `404` if missing |
+| `GET` | `/received` | yes | Received files, newest first: `id`, `name`, `size`, `received_at`, `request_id`, `request_title`, `uploader`, `ip` |
+| `POST` | `/received/check` | yes | `{ "password" }`; `204` if it unlocks the admin key, `403` if not. The page calls it before a download |
+| `POST` | `/received/{id}/download` | yes | Form body `password=`; the decrypted file as an attachment. `403` wrong password, `404` if missing. Logged |
+| `DELETE` | `/received/{id}` | yes | Delete a received file; `204`, `404` if missing |
 | `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
 
 Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.

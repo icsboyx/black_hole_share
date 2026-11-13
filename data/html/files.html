@@ -33,6 +33,13 @@
       </section>
 
       <section id="filesView" hidden>
+      <div class="tabs" role="tablist">
+        <button class="tab" type="button" role="tab" id="tabBtn-share" aria-controls="tab-share" data-tab="share">Share</button>
+        <button class="tab" type="button" role="tab" id="tabBtn-requests" aria-controls="tab-requests" data-tab="requests">Requests</button>
+        <button class="tab" type="button" role="tab" id="tabBtn-received" aria-controls="tab-received" data-tab="received">Received</button>
+      </div>
+
+      <div id="tab-share" role="tabpanel" aria-labelledby="tabBtn-share">
       <form id="fileForm" class="settings-card" novalidate>
         <div class="settings-head">
           <div>
@@ -113,6 +120,87 @@
         <p class="message" id="filesMessage" style="padding: 0 22px"></p>
         <div class="table-wrap file-table" id="filesTable"></div>
       </div>
+      </div>
+
+      <div id="tab-requests" role="tabpanel" aria-labelledby="tabBtn-requests" hidden>
+      <form id="requestForm" class="settings-card" novalidate>
+        <div class="settings-head">
+          <div>
+            <h2>Request files</h2>
+            <p>Create a link that lets someone send you files. They are encrypted for you on arrival and only you can download them.</p>
+          </div>
+        </div>
+        <div class="settings-grid">
+          <div class="field wide">
+            <label class="field-label" for="requestTitle">Title</label>
+            <div class="input-wrap"><input id="requestTitle" type="text" maxlength="100" placeholder="e.g. Documents for the contract" /></div>
+            <div class="field-help">Shown at the top of the upload page</div>
+          </div>
+          <div class="field wide">
+            <label class="field-label" for="requestMessage">Message</label>
+            <div class="input-wrap"><textarea id="requestMessage" rows="3" maxlength="1000" placeholder="Optional: what to send and why"></textarea></div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="requestMaxSize">Largest file</label>
+            <div class="input-wrap">
+              <input id="requestMaxSize" type="number" min="1" step="1" value="100" inputmode="numeric" />
+              <select id="requestMaxSizeUnit" aria-label="Size unit">
+                <option value="1048576" selected>MB</option>
+                <option value="1073741824">GB</option>
+              </select>
+            </div>
+            <div class="field-help" id="requestMaxSizeHelp">Per file</div>
+          </div>
+          <div class="field">
+            <label class="field-label" for="requestMaxFiles">Max files</label>
+            <div class="input-wrap"><input id="requestMaxFiles" type="number" min="1" step="1" placeholder="No limit" inputmode="numeric" /></div>
+            <div class="field-help">The link closes after the last one</div>
+          </div>
+          <div class="field wide">
+            <label class="field-label" for="requestExtensions">File types</label>
+            <div class="input-wrap"><input id="requestExtensions" type="text" spellcheck="false" placeholder="e.g. pdf, jpg, png" /></div>
+            <div class="field-help">Extensions separated by commas; empty accepts any type. Only the file name is checked, not its content.</div>
+          </div>
+          <div class="field wide">
+            <span class="field-label">Uploader name</span>
+            <label class="toggle"><input id="requestRequireName" type="checkbox" /> Required</label>
+            <div class="field-help">The upload page always asks for a name; checked, it cannot be left empty.</div>
+          </div>
+        </div>
+        <div class="share-result" id="requestResult" hidden></div>
+        <div class="settings-foot">
+          <p class="message" id="requestFormMessage"></p>
+          <div class="settings-actions">
+            <button class="btn-primary" type="submit" id="requestCreateBtn">Create link</button>
+          </div>
+        </div>
+      </form>
+
+      <div class="settings-card">
+        <div class="settings-head">
+          <div>
+            <h2>Open requests</h2>
+            <p id="requestsSummary">Links that accept files.</p>
+          </div>
+        </div>
+        <p class="message" id="requestsMessage" style="padding: 0 22px"></p>
+        <div class="table-wrap file-table" id="requestsTable"></div>
+      </div>
+      </div>
+
+      <div id="tab-received" role="tabpanel" aria-labelledby="tabBtn-received" hidden>
+      <div class="settings-card">
+        <div class="settings-head">
+          <div>
+            <h2>Received files</h2>
+            <p id="receivedSummary">Files sent to you through your requests. Downloading one asks for your password, which decrypts it.</p>
+          </div>
+          <div class="chips"><button class="btn-ghost" type="button" id="receivedRefresh">Refresh</button></div>
+        </div>
+        <p class="message" id="receivedMessage" style="padding: 0 22px"></p>
+        <div class="table-wrap file-table" id="receivedTable"></div>
+      </div>
+      </div>
       </section>
     </div>
   </main>
@@ -121,14 +209,14 @@
     <form id="keyDialogForm" method="dialog" novalidate>
       <div class="settings-head">
         <div>
-          <h2>Show file key</h2>
+          <h2 id="keyDialogTitle">Show file key</h2>
           <p id="keyDialogFile"></p>
         </div>
       </div>
       <div class="field">
         <label class="field-label" for="keyDialogPassword">Admin password</label>
         <div class="input-wrap"><input id="keyDialogPassword" type="password" autocomplete="current-password" /></div>
-        <div class="field-help">It decrypts the stored key; it is not saved anywhere.</div>
+        <div class="field-help">It decrypts your stored key; it is not saved anywhere.</div>
       </div>
       <div class="settings-foot">
         <p class="message" id="keyDialogMessage"></p>
@@ -213,6 +301,22 @@
       );
     }
 
+    // A result panel like the one after an upload, built inside `container`.
+    function resultPanel(container, title, rows, note) {
+      const close = el("button", { className: "btn-ghost", type: "button" }, "Close");
+      close.addEventListener("click", () => {
+        container.hidden = true;
+        container.replaceChildren();
+      });
+      const parts = [
+        el("div", { className: "share-result-head" }, el("strong", {}, title), close),
+        el("div", { className: "share-result-rows" }, ...rows),
+      ];
+      if (note) parts.push(el("p", { className: "share-result-note" }, note));
+      container.replaceChildren(...parts);
+      container.hidden = false;
+    }
+
     function showShareResult(item) {
       document.getElementById("shareResultTitle").textContent = `Shared "${item.name}"`;
       const rows = [secretRow("Link", fileLink(item))];
@@ -242,42 +346,64 @@
       } else if (revealedKeys.has(item.id)) {
         openKeys.add(item.id);
       } else {
-        openKeyDialog(item);
+        askPassword({
+          title: "Show file key",
+          subject: item.name,
+          submitLabel: "Show key",
+          action: async (password) => {
+            const result = await api(`/files/${encodeURIComponent(item.id)}/key`, {
+              method: "POST",
+              body: { password },
+            });
+            if (result.response.status === 401) return LOGIN_REQUIRED;
+            if (!result.response.ok || !result.data) return errorText(result, "Cannot show the key");
+            revealedKeys.set(item.id, result.data.key);
+            openKeys.add(item.id);
+            renderFiles(lastFiles);
+            return null;
+          },
+        });
         return;
       }
       renderFiles(lastFiles);
     }
 
-    // ------------------------------------------------------------------ key dialog
+    // ------------------------------------------------------------------ password dialog
 
-    const keyDialog = document.getElementById("keyDialog");
-    let keyDialogItem = null;
+    // Returned by a dialog action when the session has ended.
+    const LOGIN_REQUIRED = Symbol("login required");
+    const passwordDialog = document.getElementById("keyDialog");
+    // Called with the password; resolves to null when done, or to an error text to show.
+    let passwordAction = null;
 
-    function openKeyDialog(item) {
-      keyDialogItem = item;
-      document.getElementById("keyDialogFile").textContent = item.name;
+    function askPassword({ title, subject, submitLabel, action }) {
+      passwordAction = action;
+      document.getElementById("keyDialogTitle").textContent = title;
+      document.getElementById("keyDialogFile").textContent = subject;
+      document.getElementById("keyDialogSubmit").textContent = submitLabel;
       document.getElementById("keyDialogPassword").value = "";
       setMessage("keyDialogMessage", "");
-      keyDialog.showModal();
+      passwordDialog.showModal();
       document.getElementById("keyDialogPassword").focus();
     }
 
-    function closeKeyDialog() {
+    function closePasswordDialog() {
       // The password must not stay in the page.
       document.getElementById("keyDialogPassword").value = "";
-      keyDialogItem = null;
-      keyDialog.close();
+      passwordAction = null;
+      passwordDialog.close();
     }
 
-    document.getElementById("keyDialogCancel").addEventListener("click", closeKeyDialog);
-    keyDialog.addEventListener("cancel", () => {
+    document.getElementById("keyDialogCancel").addEventListener("click", closePasswordDialog);
+    passwordDialog.addEventListener("cancel", () => {
       document.getElementById("keyDialogPassword").value = "";
+      passwordAction = null;
     });
     document.getElementById("keyDialogForm").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const item = keyDialogItem;
+      const action = passwordAction;
       const password = document.getElementById("keyDialogPassword").value;
-      if (!item) return;
+      if (!action) return;
       if (!password) {
         setMessage("keyDialogMessage", "Enter your password.");
         return;
@@ -285,21 +411,15 @@
       const submit = document.getElementById("keyDialogSubmit");
       submit.disabled = true;
       setMessage("keyDialogMessage", "Checking...", "ok");
-      const result = await api(`/files/${encodeURIComponent(item.id)}/key`, {
-        method: "POST",
-        body: { password },
-      });
+      const error = await action(password);
       submit.disabled = false;
-      if (result.response.ok && result.data) {
-        revealedKeys.set(item.id, result.data.key);
-        openKeys.add(item.id);
-        closeKeyDialog();
-        renderFiles(lastFiles);
-      } else if (result.response.status === 401) {
-        closeKeyDialog();
+      if (error === null) {
+        closePasswordDialog();
+      } else if (error === LOGIN_REQUIRED) {
+        closePasswordDialog();
         showLoginPrompt();
       } else {
-        setMessage("keyDialogMessage", errorText(result, "Cannot show the key"));
+        setMessage("keyDialogMessage", error);
       }
     });
 
@@ -509,6 +629,238 @@
     document.getElementById("fileCancel").addEventListener("click", () => uploadRequest?.abort());
     document.getElementById("filesRefresh").addEventListener("click", loadFiles);
 
+    // ------------------------------------------------------------------ requests
+
+    function requestLink(item) {
+      return `${location.origin}${item.link}`;
+    }
+
+    // Reads the request form. Ranges are checked again by the server.
+    function readRequestForm() {
+      const title = document.getElementById("requestTitle").value.trim();
+      const message = document.getElementById("requestMessage").value.trim();
+      const size = Number(document.getElementById("requestMaxSize").value);
+      const unit = Number(document.getElementById("requestMaxSizeUnit").value);
+      const maxRaw = document.getElementById("requestMaxFiles").value.trim();
+      const extensions = document.getElementById("requestExtensions").value
+        .split(/[\s,;]+/)
+        .map((ext) => ext.trim())
+        .filter((ext) => ext !== "");
+      if (!title) return { error: "Enter a title." };
+      if (!(size > 0)) return { error: "The largest file must be more than 0." };
+      const maxFileSize = Math.round(size * unit);
+      if (settings && maxFileSize > settings.max_file_size_bytes) {
+        return { error: `The largest file can be at most ${formatBytes(settings.max_file_size_bytes)} (the per-file limit in the settings).` };
+      }
+      let maxFiles = null;
+      if (maxRaw !== "") {
+        maxFiles = Number(maxRaw);
+        if (!Number.isInteger(maxFiles) || maxFiles < 1) return { error: "Max files must be a whole number of at least 1." };
+      }
+      return {
+        body: {
+          title,
+          message,
+          max_file_size_bytes: maxFileSize,
+          extensions,
+          max_files: maxFiles,
+          require_name: document.getElementById("requestRequireName").checked,
+        },
+      };
+    }
+
+    document.getElementById("requestForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = readRequestForm();
+      if (form.error) {
+        setMessage("requestFormMessage", form.error);
+        return;
+      }
+      const button = document.getElementById("requestCreateBtn");
+      button.disabled = true;
+      setMessage("requestFormMessage", "");
+      const result = await api("/requests", { method: "POST", body: form.body });
+      button.disabled = false;
+      if (result.response.status === 401) {
+        showLoginPrompt();
+        return;
+      }
+      if (result.response.status !== 201 || !result.data) {
+        setMessage("requestFormMessage", errorText(result, "Cannot create the link"));
+        return;
+      }
+      document.getElementById("requestForm").reset();
+      resultPanel(
+        document.getElementById("requestResult"),
+        `Link for "${result.data.title}"`,
+        [secretRow("Link", requestLink(result.data))],
+        "Send this link to the people who should upload. Anyone with it can send files until it closes."
+      );
+      await loadRequests();
+    });
+
+    function requestTypes(item) {
+      return item.extensions.length > 0 ? item.extensions.join(", ") : "Any";
+    }
+
+    async function loadRequests() {
+      const result = await api("/requests");
+      if (result.response.status === 401) {
+        showLoginPrompt();
+        return;
+      }
+      if (!result.response.ok) {
+        setMessage("requestsMessage", errorText(result, "Failed to load requests"));
+        return;
+      }
+      const requests = result.data;
+      const rows = requests.map((item) => {
+        const closeBtn = el("button", { className: "btn-ghost danger", type: "button" }, "Close");
+        closeBtn.addEventListener("click", () => closeRequest(item));
+        const received = item.max_files === null ? `${item.uploads}` : `${item.uploads} / ${item.max_files}`;
+        const state = item.files_left === 0 ? "Full" : "Open";
+        return el(
+          "tr",
+          {},
+          el("td", { className: "name", title: item.title }, item.title),
+          el("td", {}, received),
+          el("td", {}, formatBytes(item.max_file_size_bytes)),
+          el("td", { className: "name narrow", title: requestTypes(item) }, requestTypes(item)),
+          el("td", {}, state),
+          el("td", {}, el("div", { className: "row-actions" }, copyButton(requestLink(item), "Copy link"), closeBtn))
+        );
+      });
+      document.getElementById("requestsSummary").textContent =
+        requests.length === 0 ? "No request is open." : `${requests.length} request link(s).`;
+      document.getElementById("requestsTable").replaceChildren(
+        table(["Title", "Files", "Largest", "Types", "State", ""], rows)
+      );
+    }
+
+    async function closeRequest(item) {
+      if (!confirm(`Close "${item.title}"? Its link stops accepting files; files already received stay.`)) return;
+      const result = await api(`/requests/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (result.response.status === 401) {
+        showLoginPrompt();
+        return;
+      }
+      if (result.response.status === 204) {
+        setMessage("requestsMessage", "Request closed.", "ok");
+      } else {
+        setMessage("requestsMessage", errorText(result, "Close failed"));
+      }
+      await loadRequests();
+    }
+
+    // ------------------------------------------------------------------ received files
+
+    // Downloads through a native form POST, so the browser saves the decrypted file straight
+    // to disk. The password is checked first, so a wrong one is reported in the dialog.
+    function downloadReceived(item) {
+      askPassword({
+        title: "Download received file",
+        subject: item.name,
+        submitLabel: "Download",
+        action: async (password) => {
+          const check = await api("/received/check", { method: "POST", body: { password } });
+          if (check.response.status === 401) return LOGIN_REQUIRED;
+          if (check.response.status !== 204) return errorText(check, "Cannot check the password");
+          const form = el("form", {
+            method: "post",
+            action: `/api/admin/received/${encodeURIComponent(item.id)}/download`,
+            hidden: true,
+          });
+          const field = el("input", { type: "hidden", name: "password", value: password });
+          form.append(field);
+          document.body.append(form);
+          form.submit();
+          // submit() has already read the fields: the password can go.
+          field.value = "";
+          form.remove();
+          return null;
+        },
+      });
+    }
+
+    function shortTime(millis) {
+      return new Date(millis).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+    }
+
+    async function loadReceived() {
+      const result = await api("/received");
+      if (result.response.status === 401) {
+        showLoginPrompt();
+        return;
+      }
+      if (!result.response.ok) {
+        setMessage("receivedMessage", errorText(result, "Failed to load received files"));
+        return;
+      }
+      const files = result.data;
+      const rows = files.map((item) => {
+        const downloadBtn = el("button", { className: "btn-ghost", type: "button" }, "Download");
+        downloadBtn.addEventListener("click", () => downloadReceived(item));
+        const deleteBtn = el("button", { className: "btn-ghost danger", type: "button" }, "Delete");
+        deleteBtn.addEventListener("click", () => deleteReceived(item));
+        const from = item.uploader || "—";
+        return el(
+          "tr",
+          {},
+          el("td", { className: "name", title: item.name }, item.name),
+          el("td", {}, formatBytes(item.size)),
+          el("td", { className: "name narrow", title: item.ip ? `${from} (${item.ip})` : from }, from),
+          el("td", { className: "name narrow", title: item.request_title }, item.request_title),
+          el("td", { title: formatTime(item.received_at) }, shortTime(item.received_at)),
+          el("td", {}, el("div", { className: "row-actions" }, downloadBtn, deleteBtn))
+        );
+      });
+      document.getElementById("receivedSummary").textContent =
+        files.length === 0
+          ? "Nothing received yet."
+          : `${files.length} file(s). Downloading one asks for your password, which decrypts it.`;
+      document.getElementById("tabBtn-received").textContent = files.length > 0 ? `Received (${files.length})` : "Received";
+      document.getElementById("receivedTable").replaceChildren(
+        table(["Name", "Size", "From", "Request", "Received", ""], rows)
+      );
+    }
+
+    async function deleteReceived(item) {
+      if (!confirm(`Delete "${item.name}"? It cannot be recovered.`)) return;
+      const result = await api(`/received/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (result.response.status === 401) {
+        showLoginPrompt();
+        return;
+      }
+      if (result.response.status === 204) {
+        setMessage("receivedMessage", "File deleted.", "ok");
+      } else {
+        setMessage("receivedMessage", errorText(result, "Delete failed"));
+      }
+      await loadPage();
+    }
+
+    document.getElementById("receivedRefresh").addEventListener("click", loadReceived);
+
+    // ------------------------------------------------------------------ tabs
+
+    const TABS = ["share", "requests", "received"];
+
+    function selectTab(name, updateUrl = true) {
+      const tab = TABS.includes(name) ? name : "share";
+      for (const id of TABS) {
+        document.getElementById(`tab-${id}`).hidden = id !== tab;
+        document.getElementById(`tabBtn-${id}`).setAttribute("aria-selected", String(id === tab));
+      }
+      if (updateUrl && location.hash !== `#${tab}`) {
+        history.replaceState(null, "", `#${tab}`);
+      }
+    }
+
+    for (const button of document.querySelectorAll(".tab")) {
+      button.addEventListener("click", () => selectTab(button.dataset.tab));
+    }
+    window.addEventListener("hashchange", () => selectTab(location.hash.slice(1), false));
+
     async function loadPage() {
       const [settingsResult, stats] = await Promise.all([api("/settings"), api("/stats")]);
       if (settingsResult.response.status === 401 || stats.response.status === 401) {
@@ -521,7 +873,9 @@
       }
       settings = settingsResult.data.current;
       renderFileLimits(stats.data);
-      await loadFiles();
+      document.getElementById("requestMaxSizeHelp").textContent =
+        `Per file, up to ${formatBytes(settings.max_file_size_bytes)} (settings)`;
+      await Promise.all([loadFiles(), loadRequests(), loadReceived()]);
     }
 
     async function init() {
@@ -535,9 +889,10 @@
         return;
       }
       showOnly("filesView");
+      selectTab(location.hash.slice(1), false);
       await loadPage();
       // Keeps the countdowns in the list current.
-      setInterval(loadFiles, 30000);
+      setInterval(() => Promise.all([loadFiles(), loadRequests(), loadReceived()]), 30000);
     }
 
     init();

@@ -7,10 +7,13 @@ use serde_json::json;
 
 use crate::{ALLOWED_CONTENT_TYPES, CONTENT_CSP};
 use crate::{
-    crypto::{ChunkCipher, FileKey, TAG_BYTES, chunk_count, plain_chunk_len},
+    crypto::{ChunkCipher, FileKey, TAG_BYTES, chunk_count, plain_chunk_len, wrap_file_key},
     data_mgt::{AppState, Asset},
-    files::{Decryption, Download, KeyCheck},
+    files::{
+        Decryption, Download, FileEncryption, FileError, KeyCheck, NewFile, Received, SharedFile,
+    },
     logs::LogEventType,
+    requests::{SlotError, clean_uploader},
 };
 
 /// Room for the JSON fields around the content (`duration`, `content_type`, ...).
@@ -446,6 +449,16 @@ async fn serve_download(
         .await
         .unwrap_or_else(|e| println!("Failed to log file download: {}", e));
 
+    Ok(attachment_response(&file, handle, decryption))
+}
+
+/// The whole file as a download that a browser saves and never renders, decrypted on the
+/// way when `decryption` is given.
+pub(crate) fn attachment_response(
+    file: &SharedFile,
+    handle: tokio::fs::File,
+    decryption: Option<Box<Decryption>>,
+) -> HttpResponse {
     let mut response = HttpResponse::Ok();
     response
         .content_type(mime::APPLICATION_OCTET_STREAM)
@@ -453,10 +466,197 @@ async fn serve_download(
         .insert_header((header::CACHE_CONTROL, "no-store"))
         .insert_header(("Content-Security-Policy", CONTENT_CSP))
         .no_chunking(file.size);
-    Ok(match decryption {
+    match decryption {
         Some(decryption) => response.streaming(decrypted_chunks(handle, file.size, decryption)),
         None => response.streaming(file_chunks(handle).boxed_local()),
-    })
+    }
+}
+
+/// What the upload page of a request shows.
+#[get("/api/requests/{id}")]
+async fn api_request_info(
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let Some(id) = parse_file_id(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid request id" })));
+    };
+    let Some(request) = app_state.requests.get(&id).await else {
+        return Ok(request_not_found_response());
+    };
+    // The settings may have lowered the per-file limit since the request was created.
+    let max_file_size = request
+        .max_file_size_bytes
+        .min(app_state.settings.get().max_file_size_bytes);
+    Ok(HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .json(json!({
+            "title": request.title,
+            "message": request.message,
+            "max_file_size_bytes": max_file_size,
+            "extensions": request.extensions,
+            "files_left": request.files_left(),
+            "require_name": request.require_name,
+        })))
+}
+
+#[derive(Deserialize)]
+struct RequestUploadQuery {
+    name: String,
+    uploader: Option<String>,
+}
+
+fn request_not_found_response() -> HttpResponse {
+    HttpResponse::NotFound()
+        .json(json!({ "error": "This upload link does not exist or was closed" }))
+}
+
+/// Upload of one file to a request: the raw bytes are the body, the file name and the
+/// uploader's name are in the query string. The file is encrypted for the admin and only
+/// the admin can download it.
+#[post("/api/requests/{id}/files")]
+async fn api_request_upload(
+    req: HttpRequest,
+    path: web::Path<String>,
+    payload: web::Payload,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let Some(id) = parse_file_id(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid request id" })));
+    };
+    let slot = match app_state.requests.begin_upload(&id).await {
+        Ok(slot) => slot,
+        Err(SlotError::NotFound) => return Ok(request_not_found_response()),
+        Err(SlotError::Full) => {
+            return Ok(HttpResponse::Gone().json(
+                json!({ "error": "This upload link has received all the files it accepts" }),
+            ));
+        }
+    };
+    let request = slot.request().clone();
+
+    let query = match web::Query::<RequestUploadQuery>::from_query(req.query_string()) {
+        Ok(query) => query.into_inner(),
+        Err(e) => return Ok(HttpResponse::BadRequest().json(json!({ "error": format!("{e}") }))),
+    };
+    let uploader = match clean_uploader(query.uploader.as_deref(), request.require_name) {
+        Ok(uploader) => uploader,
+        Err(message) => return Ok(HttpResponse::BadRequest().json(json!({ "error": message }))),
+    };
+    let Some(name) = crate::files::clean_file_name(&query.name) else {
+        return Ok(
+            HttpResponse::BadRequest().json(json!({ "error": "File name is missing or too long" }))
+        );
+    };
+    if !request.allows(&name) {
+        return Ok(HttpResponse::UnsupportedMediaType().json(json!({
+            "error": format!("This file type is not accepted. Allowed: {}", request.extensions.join(", "))
+        })));
+    }
+    let Some(length) = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(
+            HttpResponse::LengthRequired().json(json!({ "error": "Content-Length is required" }))
+        );
+    };
+    let settings = app_state.settings.get();
+    let max_file_size = request
+        .max_file_size_bytes
+        .min(settings.max_file_size_bytes);
+    if length > max_file_size {
+        return Ok(HttpResponse::PayloadTooLarge()
+            .json(json!({ "error": format!("The file is larger than {max_file_size} bytes") })));
+    }
+
+    // Every received file is encrypted for the admin: the uploader never sees a key.
+    let Some(public_key) = app_state.admin.public_key().await else {
+        eprintln!("Upload request {id}: the admin has no encryption keys yet");
+        return Ok(HttpResponse::ServiceUnavailable()
+            .json(json!({ "error": "This upload link cannot accept files right now" })));
+    };
+    let key = match FileKey::generate()
+        .and_then(|key| wrap_file_key(&public_key, &key).map(|wrapped| (key, wrapped)))
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Cannot create a file key: {e:#}");
+            return Ok(
+                HttpResponse::InternalServerError().json(json!({ "error": "Upload failed" }))
+            );
+        }
+    };
+    let ip = crate::client_ip(&req);
+    let new = NewFile {
+        name,
+        duration_minutes: 0,
+        valid_from: None,
+        max_downloads: None,
+        received: Some(Received {
+            request_id: request.id,
+            request_title: request.title.clone(),
+            uploader: uploader.clone(),
+            ip: ip.clone(),
+        }),
+    };
+    let encryption = Some(FileEncryption {
+        key: &key.0,
+        wrapped: key.1.clone(),
+    });
+    let file = match app_state
+        .files
+        .add(new, length, payload, &settings, encryption)
+        .await
+    {
+        Ok(file) => file,
+        Err(FileError::InvalidInput(message)) => {
+            return Ok(HttpResponse::BadRequest().json(json!({ "error": message })));
+        }
+        Err(FileError::TooLarge) => {
+            return Ok(HttpResponse::PayloadTooLarge().json(
+                json!({ "error": format!("The file is larger than {max_file_size} bytes") }),
+            ));
+        }
+        Err(FileError::StorageFull) => {
+            return Ok(HttpResponse::InsufficientStorage()
+                .json(json!({ "error": "There is no space left for this file" })));
+        }
+        Err(FileError::LengthMismatch) => {
+            return Ok(HttpResponse::BadRequest().json(
+                json!({ "error": "The upload was interrupted or does not match its size" }),
+            ));
+        }
+        Err(FileError::Internal(e)) => {
+            eprintln!("Request upload failed: {e:#}");
+            return Ok(
+                HttpResponse::InternalServerError().json(json!({ "error": "Upload failed" }))
+            );
+        }
+    };
+    if let Err(e) = slot.complete().await {
+        // The file is stored; only the counter could not be saved.
+        eprintln!("Cannot count the upload to request {id}: {e:#}");
+    }
+
+    let event = json!({
+        "action": "received",
+        "id": file.id,
+        "name": file.name,
+        "size": file.size,
+        "request_id": request.id,
+        "uploader": uploader,
+        "ip": ip.unwrap_or_else(|| "-".to_string()),
+    });
+    app_state
+        .log_file
+        .write_event(LogEventType::File(event))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log a received file: {}", e));
+
+    Ok(HttpResponse::Created().json(json!({ "name": file.name, "size": file.size })))
 }
 
 /// `attachment` with an ASCII fallback name plus the exact UTF-8 name (RFC 6266), so every

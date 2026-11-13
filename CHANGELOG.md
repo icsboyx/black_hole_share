@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional encryption of shared files: a random 256-bit key per file, AES-256-GCM in 64 KiB chunks while uploading and downloading. The key is shown once after the upload, sent to the downloader separately from the link, and entered on the download page; it travels in a POST body, never in a URL. A wrong key does not use up a download.
 - The admin can show a file key again with their password: keys are stored wrapped for the admin's X25519 key pair, whose private key is encrypted with a key derived from the password. Existing accounts get their key pair at the next login.
 - New dependencies: `aes-gcm`, `x25519-dalek`, `hkdf`, `sha2`, `getrandom`, `zeroize`.
+- Upload requests: the admin creates a link (`/r/{id}`) with a title, message, largest file, accepted extensions, optional number of files, and an optional required uploader name; anyone with the link can send files. Received files are encrypted on arrival for the admin, never get a public link, and are downloaded from the new **Received** tab with the admin password.
+- `/files` is split into tabs: Share, Requests, Received.
 
 ### Changed
 

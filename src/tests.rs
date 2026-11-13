@@ -22,6 +22,7 @@ use crate::{
     data_mgt::{AppState, Asset, AssetStorage, RateLimiter},
     crypto::{FileKey, encrypted_size},
     files::{FileEncryption, FileError, FileStore, NewFile, clean_file_name},
+    requests::RequestStore,
     logs::{LogEventType, LogFile, LogLimits},
     resolve_client_ip, security_headers,
     settings::{Settings, SettingsStore},
@@ -51,6 +52,7 @@ async fn state_in(dir: &std::path::Path) -> AppState {
             .unwrap(),
         settings: SettingsStore::with_values(dir.join("admin/settings.json"), defaults()),
         files: FileStore::load(dir.join("storage")).await.unwrap(),
+        requests: RequestStore::load(dir.join("storage/requests.json")).await.unwrap(),
     }
 }
 
@@ -861,7 +863,7 @@ fn file_upload(cookie: &Cookie<'static>, query: &str, body: &'static [u8]) -> Te
 }
 
 fn new_file(name: &str) -> NewFile {
-    NewFile { name: name.into(), duration_minutes: 5, valid_from: None, max_downloads: None }
+    NewFile { name: name.into(), duration_minutes: 5, valid_from: None, max_downloads: None, received: None }
 }
 
 fn chunks(
@@ -1335,4 +1337,187 @@ async fn encrypted_upload_checks_its_length_and_budget_counts_the_tags() {
     let file = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &enough, encryption(&key)).await.unwrap();
     assert_eq!(file.size, 10);
     assert_eq!(store.usage().await, (1, 26));
+}
+
+// ---------------------------------------------------------------- upload requests
+
+fn create_request(cookie: &Cookie<'static>, body: Value) -> TestRequest {
+    admin_post("/api/admin/requests", body).cookie(cookie.clone())
+}
+
+fn request_upload(id: &str, query: &str, body: &'static [u8]) -> TestRequest {
+    TestRequest::post()
+        .uri(&format!("/api/requests/{id}/files?{query}"))
+        .peer_addr(peer("198.51.100.7"))
+        .set_payload(body)
+}
+
+macro_rules! new_request {
+    ($app:expr, $cookie:expr, $body:expr) => {{
+        let response = test::call_service($app, create_request($cookie, $body).to_request()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Value = test::read_body_json(response).await;
+        created["id"].as_str().unwrap().to_string()
+    }};
+}
+
+#[actix_web::test]
+async fn someone_uploads_through_a_request_and_only_the_admin_downloads() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let body = json!({
+        "title": "Contract",
+        "message": "Send the signed PDF",
+        "max_file_size_bytes": 1000,
+        "extensions": ["PDF"],
+        "max_files": 1,
+        "require_name": true,
+    });
+    let response = test::call_service(&app, create_request(&cookie, body).to_request()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: Value = test::read_body_json(response).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["link"], format!("/r/{id}"));
+    assert_eq!(created["extensions"], json!(["pdf"]));
+
+    let page = test::call_service(&app, TestRequest::get().uri(&format!("/r/{id}")).to_request()).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    let info: Value = test::call_and_read_body_json(
+        &app,
+        TestRequest::get().uri(&format!("/api/requests/{id}")).to_request(),
+    )
+    .await;
+    assert_eq!(info["title"], "Contract");
+    assert_eq!(info["files_left"], 1);
+    assert_eq!(info["require_name"], true);
+    assert!(info.get("uploads").is_none());
+
+    let refused = [
+        ("name=photo.jpg&uploader=Ada", StatusCode::UNSUPPORTED_MEDIA_TYPE),
+        ("name=signed.pdf", StatusCode::BAD_REQUEST),
+        ("name=signed.pdf&uploader=%20", StatusCode::BAD_REQUEST),
+    ];
+    for (query, status) in refused {
+        let response = test::call_service(&app, request_upload(&id, query, b"%PDF-1.7 signed").to_request()).await;
+        assert_eq!(response.status(), status, "{query}");
+    }
+    let big: &'static [u8] = Box::leak(vec![b'x'; 1001].into_boxed_slice());
+    let response = test::call_service(&app, request_upload(&id, "name=big.pdf&uploader=Ada", big).to_request()).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let response = test::call_service(&app, request_upload(&id, "name=signed.pdf&uploader=Ada", b"%PDF-1.7 signed").to_request()).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    // The request accepted its one file and is now full.
+    let response = test::call_service(&app, request_upload(&id, "name=again.pdf&uploader=Ada", b"%PDF").to_request()).await;
+    assert_eq!(response.status(), StatusCode::GONE);
+
+    let received: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/received", &cookie).to_request()).await;
+    assert_eq!(received.as_array().unwrap().len(), 1);
+    let file = &received[0];
+    assert_eq!(file["name"], "signed.pdf");
+    assert_eq!(file["uploader"], "Ada");
+    assert_eq!(file["request_title"], "Contract");
+    assert_eq!(file["ip"], "198.51.100.7");
+    let file_id = file["id"].as_str().unwrap().to_string();
+
+    // Encrypted on disk, invisible to the public file routes and the shared list.
+    let stored = fs::read(dir.join("storage").join(&file_id)).unwrap();
+    assert!(!stored.windows(8).any(|w| w == b"%PDF-1.7"));
+    for uri in [format!("/api/files/{file_id}/info"), format!("/api/files/{file_id}")] {
+        let response = test::call_service(&app, TestRequest::get().uri(&uri).to_request()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    let shared: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/files", &cookie).to_request()).await;
+    assert_eq!(shared, json!([]));
+
+    let download = |password: &str| {
+        TestRequest::post()
+            .uri(&format!("/api/admin/received/{file_id}/download"))
+            .cookie(cookie.clone())
+            .set_form([("password", password)])
+            .to_request()
+    };
+    let response = test::call_service(&app, download("wrong password")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = test::call_service(&app, download(ADMIN_PASSWORD)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let disposition = response.headers().get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap();
+    assert!(disposition.contains(r#"filename="signed.pdf""#), "{disposition}");
+    assert_eq!(test::read_body(response).await.as_ref(), b"%PDF-1.7 signed");
+
+    // Without a session nothing is downloaded, even with the password.
+    let anonymous = TestRequest::post()
+        .uri(&format!("/api/admin/received/{file_id}/download"))
+        .set_form([("password", ADMIN_PASSWORD)]);
+    let response = test::call_service(&app, anonymous.to_request()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let check = |password: &str| {
+        admin_post("/api/admin/received/check", json!({ "password": password })).cookie(cookie.clone()).to_request()
+    };
+    assert_eq!(test::call_service(&app, check("nope nope")).await.status(), StatusCode::FORBIDDEN);
+    assert_eq!(test::call_service(&app, check(ADMIN_PASSWORD)).await.status(), StatusCode::NO_CONTENT);
+
+    // Closing the request keeps what it received.
+    let close = TestRequest::delete().uri(&format!("/api/admin/requests/{id}")).cookie(cookie.clone());
+    assert_eq!(test::call_service(&app, close.to_request()).await.status(), StatusCode::NO_CONTENT);
+    let response = test::call_service(&app, TestRequest::get().uri(&format!("/api/requests/{id}")).to_request()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let received: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/received", &cookie).to_request()).await;
+    assert_eq!(received.as_array().unwrap().len(), 1);
+
+    // The shared-file delete route cannot reach a received file; its own route can.
+    let wrong_route = TestRequest::delete().uri(&format!("/api/admin/files/{file_id}")).cookie(cookie.clone());
+    assert_eq!(test::call_service(&app, wrong_route.to_request()).await.status(), StatusCode::NOT_FOUND);
+    let delete = TestRequest::delete().uri(&format!("/api/admin/received/{file_id}")).cookie(cookie.clone());
+    assert_eq!(test::call_service(&app, delete.to_request()).await.status(), StatusCode::NO_CONTENT);
+    assert!(!dir.join("storage").join(&file_id).exists());
+}
+
+#[actix_web::test]
+async fn request_without_limits_accepts_any_file_and_survives_a_restart() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let id = new_request!(&app, &cookie, json!({ "title": "Anything", "max_file_size_bytes": 100 }));
+    for name in ["a.bin", "noextension"] {
+        let response = test::call_service(&app, request_upload(&id, &format!("name={name}"), b"data").to_request()).await;
+        assert_eq!(response.status(), StatusCode::CREATED, "{name}");
+    }
+
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_login!(&app, ADMIN_PASSWORD);
+    let requests: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/requests", &cookie).to_request()).await;
+    assert_eq!(requests[0]["uploads"], 2);
+    assert_eq!(requests[0]["files_left"], Value::Null);
+    let received: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/received", &cookie).to_request()).await;
+    assert_eq!(received.as_array().unwrap().len(), 2);
+}
+
+#[actix_web::test]
+async fn invalid_requests_and_unknown_links_are_refused() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let too_big = defaults().max_file_size_bytes + 1;
+    for body in [
+        json!({ "title": "", "max_file_size_bytes": 10 }),
+        json!({ "title": "x", "max_file_size_bytes": too_big }),
+        json!({ "title": "x", "max_file_size_bytes": 10, "extensions": ["p df"] }),
+        json!({ "title": "x", "max_file_size_bytes": 10, "max_files": 0 }),
+    ] {
+        let response = test::call_service(&app, create_request(&cookie, body.clone()).to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let anonymous = admin_post("/api/admin/requests", json!({ "title": "x", "max_file_size_bytes": 10 }));
+    assert_eq!(test::call_service(&app, anonymous.to_request()).await.status(), StatusCode::UNAUTHORIZED);
+
+    let unknown = uuid::Uuid::new_v4();
+    let response = test::call_service(&app, request_upload(&unknown.to_string(), "name=a.txt", b"a").to_request()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

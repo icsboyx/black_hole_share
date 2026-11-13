@@ -57,9 +57,31 @@ pub struct SharedFile {
     /// `size` is still the plaintext size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrapped_key: Option<WrappedKey>,
+    /// Present for a file received through an upload request. Such a file is private: it
+    /// never has a public link, only the admin can download it, and it does not expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received: Option<Received>,
 }
 
+/// Where a received file came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Received {
+    pub request_id: Uuid,
+    /// Kept so the file still says where it came from after the request is deleted.
+    pub request_title: String,
+    pub uploader: Option<String>,
+    pub ip: Option<String>,
+}
+
+/// Received files are kept until the admin deletes them.
+const NEVER: i64 = i64::MAX;
+
 impl SharedFile {
+    /// A file shared through a public link, as opposed to one received from a request.
+    pub fn is_shared(&self) -> bool {
+        self.received.is_none()
+    }
+
     pub fn is_encrypted(&self) -> bool {
         self.wrapped_key.is_some()
     }
@@ -90,6 +112,9 @@ pub struct NewFile {
     pub duration_minutes: u32,
     pub valid_from: Option<i64>,
     pub max_downloads: Option<u32>,
+    /// Set for a file received through an upload request; the duration and limits above
+    /// are then ignored.
+    pub received: Option<Received>,
 }
 
 /// How to encrypt an upload: the new file's key and the same key wrapped for the admin.
@@ -337,6 +362,7 @@ impl FileStore {
             max_downloads: new.max_downloads,
             downloads: 0,
             wrapped_key,
+            received: new.received,
         };
         let mut updated = files.clone();
         updated.push(file.clone());
@@ -356,7 +382,7 @@ impl FileStore {
         let mut files = self.files.lock().await;
         let Some(index) = files
             .iter()
-            .position(|file| file.id == *id && !file.is_expired(now))
+            .position(|file| file.id == *id && file.is_shared() && !file.is_expired(now))
         else {
             return Ok(Download::NotFound);
         };
@@ -438,25 +464,68 @@ impl FileStore {
         })
     }
 
-    /// The file if it exists and has not expired, whether or not it is available yet.
+    /// The shared file if it exists and has not expired, whether or not it is available yet.
+    /// Received files are never returned: they have no public link.
     pub async fn get(&self, id: &Uuid) -> Option<SharedFile> {
         let now = Utc::now().timestamp_millis();
         let files = self.files.lock().await;
         files
             .iter()
-            .find(|file| file.id == *id && !file.is_expired(now))
+            .find(|file| file.id == *id && file.is_shared() && !file.is_expired(now))
             .cloned()
     }
 
-    /// Files that have not expired, oldest first.
+    /// Shared files that have not expired, oldest first.
     pub async fn list(&self) -> Vec<SharedFile> {
         let now = Utc::now().timestamp_millis();
         let files = self.files.lock().await;
         files
             .iter()
-            .filter(|file| !file.is_expired(now))
+            .filter(|file| file.is_shared() && !file.is_expired(now))
             .cloned()
             .collect()
+    }
+
+    /// Files received through upload requests, newest first.
+    pub async fn list_received(&self) -> Vec<SharedFile> {
+        let files = self.files.lock().await;
+        let mut received: Vec<SharedFile> = files
+            .iter()
+            .filter(|file| !file.is_shared())
+            .cloned()
+            .collect();
+        received.reverse();
+        received
+    }
+
+    /// Opens a received file for the admin and checks its key on the first chunk. Not
+    /// counted as a download. `None` when no such received file exists.
+    pub async fn open_received(
+        &self,
+        id: &Uuid,
+        key: &FileKey,
+    ) -> Result<Option<(SharedFile, fs::File, Box<Decryption>)>> {
+        let file = {
+            let files = self.files.lock().await;
+            match files
+                .iter()
+                .find(|file| file.id == *id && !file.is_shared())
+            {
+                Some(file) => file.clone(),
+                None => return Ok(None),
+            }
+        };
+        let path = content_path(&self.dir, id);
+        let mut handle = match fs::File::open(&path).await {
+            Ok(handle) => handle,
+            // Deleted since the lookup.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
+        };
+        let decryption = read_first_chunk(&mut handle, file.size, key)
+            .await?
+            .ok_or_else(|| anyhow!("the stored key does not open received file {id}"))?;
+        Ok(Some((file, handle, Box::new(decryption))))
     }
 
     /// Number of stored files and their total size, expired ones included until cleanup.
@@ -465,10 +534,14 @@ impl FileStore {
         (files.len(), files.iter().map(SharedFile::stored_size).sum())
     }
 
-    /// Deletes a file now. Returns it so the caller can log the deletion.
-    pub async fn remove(&self, id: &Uuid) -> Result<Option<SharedFile>> {
+    /// Deletes a shared (`received == false`) or received file now. Returns it so the
+    /// caller can log the deletion.
+    pub async fn remove(&self, id: &Uuid, received: bool) -> Result<Option<SharedFile>> {
         let mut files = self.files.lock().await;
-        let Some(index) = files.iter().position(|file| file.id == *id) else {
+        let Some(index) = files
+            .iter()
+            .position(|file| file.id == *id && file.is_shared() != received)
+        else {
             return Ok(None);
         };
         let mut updated = files.clone();
@@ -518,6 +591,9 @@ fn validate_new(
 ) -> Result<(String, Option<i64>, i64), FileError> {
     let name = clean_file_name(&new.name)
         .ok_or_else(|| FileError::InvalidInput("File name is missing or too long".into()))?;
+    if new.received.is_some() {
+        return Ok((name, None, NEVER));
+    }
     if !(1..=settings.max_file_duration_minutes).contains(&new.duration_minutes) {
         return Err(FileError::InvalidInput(format!(
             "Duration must be between 1 and {} minutes",

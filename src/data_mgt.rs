@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::auth::CredentialStore;
 use crate::files::FileStore;
+use crate::requests::RequestStore;
 use crate::logs::{LogEventType, LogFile};
 use crate::settings::{Settings, SettingsStore};
 
@@ -105,6 +106,7 @@ pub struct AppState {
     pub admin: CredentialStore,
     pub settings: SettingsStore,
     pub files: FileStore,
+    pub requests: RequestStore,
 }
 
 #[derive(Clone, Debug, Default)]

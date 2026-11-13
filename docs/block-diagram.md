@@ -113,5 +113,6 @@ flowchart TD
 - The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in `trusted_proxies`.
 - Settings are loaded from `data/admin/settings.json` at startup and changed through `/api/admin/settings`; uploads, the rate limiter, and the log writer read the current values.
 - Shared files and their index live in `data/storage/`; the store reconciles the index with the directory at startup and the cleanup loop deletes expired files.
+- Upload requests live in `data/storage/requests.json`; files received through them are stored with the shared files, always encrypted for the admin, and excluded from every public route.
 - Encrypted files are stored as AES-256-GCM chunks; their keys are wrapped for the admin's X25519 public key, whose private key in `data/admin/credentials.json` is protected by the admin password.
 - Admin credentials, the session key, the settings, and the shared files are the state kept on disk besides logs; everything else is lost on restart.
