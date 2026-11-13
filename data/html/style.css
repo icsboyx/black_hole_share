@@ -864,6 +864,17 @@ h1 .home-link:hover {
   outline: none;
 }
 
+/* Fields filled by the browser's password manager: Chromium paints them light blue and
+   ignores `background-color`, so an inset shadow covers that with the dark background. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-primary) inset;
+  box-shadow: 0 0 0 1000px var(--bg-primary) inset;
+  -webkit-text-fill-color: var(--text-primary);
+  caret-color: var(--text-primary);
+}
+
 .hint {
   color: var(--text-secondary);
   font-size: 0.85em;

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The overview counted files received through upload requests as shared files.
 - Stat cards are stacked on phone screens instead of overflowing the page.
+- Fields filled in by the browser's password manager keep the dark background instead of turning light blue.
 
 ## [2.1.0] - 2026-11-13
 
