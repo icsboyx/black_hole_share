@@ -8,131 +8,25 @@ Black Hole Share is a lightweight temporary sharing service built with Rust and 
 
 ## Features
 
-- Web UI for drag and drop, clipboard paste, click-to-upload, and text sharing
-- Temporary links with a configurable lifetime, 1 to 60 minutes by default
-- Automatic cleanup of expired assets
-- Simple JSON API for uploads, content retrieval, and live statistics
-- In-memory storage with no database dependency
-- Per-IP upload limiting based on active, not-yet-expired uploads
-- Reverse proxy support through an explicit list of trusted proxies
-- Upload type allowlist, sandboxed content delivery, and security headers on every response
-- Request and lifecycle logging with automatic rotation and bounded retention
-- Stats page showing active assets, storage usage, and recent activity
-- Admin panel at `/admin`: active assets and uploads per IP, every limit and server option editable without editing files, and a restart button
-- File sharing for the admin: any file type, stored on disk, with an expiry, an optional download limit, an optional opening time, and optional encryption at rest with a key per file
-- Upload requests: links that let anyone send files to the admin, with size, type, and count limits, encrypted on arrival
-- HTTPS behind a TLS proxy, or served directly with a self-signed certificate or your own, configured from the admin panel
-- Lockout after wrong admin passwords, per-client limits on request uploads, logs on standard output for containers
-- Pages that fit phone screens
+- **Public sharing**: text and images by drag and drop, paste, or file picker; links that expire after 1 to 60 minutes by default; kept in memory only
+- **Admin panel** (`/admin`): usage, active assets, every setting editable from the browser, restart button
+- **File sharing**: any file type stored on disk, with expiry, download limit, opening time, and optional encryption with a key per file
+- **Upload requests**: links that let anyone send files to the admin, with size, type, and count limits, encrypted on arrival
+- **HTTPS**: behind a TLS proxy (Caddy, Traefik, nginx), or served directly with a self-signed certificate or your own
+- **Safety**: upload type allowlist, sandboxed content, security headers, per-IP limits, lockout after wrong admin passwords
+- Stats page, JSON logs with rotation, also on standard output; pages that fit phone screens
 
-## Block Diagram
+## Quick Start
 
-See [docs/block-diagram.md](./docs/block-diagram.md) for the standalone rendered diagram.
-
-## How It Works
-
-1. A client uploads plain text or an image through the web UI or `POST /api/upload`.
-2. The server stores the asset in memory and assigns a UUID-based share link.
-3. The asset remains available until its TTL expires.
-4. A background cleanup task runs every second and removes expired assets.
-5. Uploads, deletions, and HTTP requests are written to the log file.
-
-```mermaid
-flowchart LR
-    A[Client] --> B[Web UI / API]
-    B --> C[Validation + Rate Limit]
-    C --> D[In-Memory Asset Store]
-    D --> E["Share Link /bhs/{id}"]
-    D --> F[Cleanup Loop]
-    B --> G[JSON Log File]
-```
-
-## Runtime Characteristics
-
-- Public assets (text and images) are stored only in memory and are lost when the process stops or restarts.
-- Files shared by the admin are stored on disk in `data/storage/` and survive restarts until they expire.
-- Static web files and logs are read from `data/`.
-- `data/logs/` is created at startup if it is missing.
-- Logs are rotated on startup and whenever `log.txt` reaches the configured size (50 MiB by default).
-- Admin credentials, the session key, the settings, and the self-signed certificate are stored in `data/admin/` and survive restarts.
-- Every log event is also printed to standard output.
-- **Back up `data/`**: losing `data/admin/credentials.json` makes encrypted files that were received through upload requests unreadable for good.
-
-## Limits
-
-Defaults; all of them can be changed in the admin panel (see [Configuration](#configuration)).
-
-| Item | Default |
-| --- | --- |
-| Asset TTL | 1 to 60 minutes |
-| Max decoded asset size | 3 MiB |
-| Max in-memory assets | 1000 |
-| Max total in-memory size | 512 MiB |
-| Max active uploads per IP | 10 |
-
-The per-IP limit is released as that client's shared items expire. Image uploads are sent as base64 in JSON, so the HTTP request body may be larger than the decoded asset; the server accepts a body of up to twice the asset size limit plus 1 KiB.
-
-## Project Layout
-
-| Path | Purpose |
-| --- | --- |
-| `src/main.rs` | Server bootstrap, routes, static file handling |
-| `src/api.rs` | Upload, content, and stats API |
-| `src/data_mgt.rs` | In-memory asset store, cleanup, rate limiting |
-| `src/logs.rs` | JSON line logging, log rotation, and in-memory stats counters |
-| `src/admin.rs` | Admin panel API and session handling |
-| `src/auth.rs` | Admin credentials (Argon2id hash) and session key storage |
-| `src/settings.rs` | Runtime settings: defaults, validation, `settings.json` storage |
-| `src/files.rs` | Shared files on disk: upload, download counting, expiry, startup reconciliation |
-| `src/crypto.rs` | File encryption (AES-256-GCM chunks) and the admin key pair (X25519) |
-| `src/requests.rs` | Upload requests: links that let others send files to the admin |
-| `src/tls.rs` | HTTPS in the server: self-signed or PEM files, fallback to HTTP, redirect target |
-| `src/throttle.rs` | Per-client limits: wrong passwords and request uploads |
-| `src/tests.rs` | Automated tests |
-| `data/html/` | Static frontend pages and web assets |
-| `data/logs/` | Runtime log output |
-| `data/admin/` | Admin credentials, session key, settings, and the self-signed certificate (`tls/`), created at runtime, never commit it |
-| `data/storage/` | Files shared by and sent to the admin (`<uuid>`), their index (`index.json`), and the upload requests (`requests.json`), created at runtime |
-
-## Run Locally
-
-Requirements:
-
-- Rust toolchain
-- The `data/html/` directory from this repository
-- Write access to `data/`, used for `data/logs/`
-
-Start the server:
-
-```bash
-cargo run --release
-```
-
-Default bind address and port, changeable in the admin panel:
-
-- Address: `0.0.0.0`
-- Port: `8080` (and `8443` for HTTPS, only when it is enabled in the panel)
-
-Then open:
-
-- `http://127.0.0.1:8080/`
-
-## Run With Docker Compose
-
-`docker compose` is the recommended container workflow because the application expects the repository `data/` directory to be mounted.
+### Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-Current compose settings:
+The compose file builds the image, publishes ports `8080` (HTTP) and `8443` (HTTPS, used only once enabled in the panel), and mounts `./data` at `/data`. The container runs as UID `1000`, so `./data` must be writable by that UID.
 
-- Container bind: `0.0.0.0:8080`
-- Host ports: `8080`, and `8443` for HTTPS when it is enabled in the admin panel
-- Data mount: `./data:/data`
-- Container user: UID `1000`, so `./data` must be writable by that UID
-
-The same with Podman, without compose:
+### Podman
 
 ```bash
 podman build -t bhs .
@@ -140,373 +34,33 @@ podman run -d --name bhs -p 8080:8080 -p 8443:8443 --userns=keep-id -v ./data:/d
 podman logs -f bhs
 ```
 
-If HTTPS is enabled in the panel but `8443` is not published, plain HTTP redirects to a port that nothing outside the container can reach.
+`--userns=keep-id` maps UID `1000` to your user with rootless Podman (`userns_mode: keep-id` in a compose file).
 
-With rootless Podman, add `userns_mode: keep-id` to the service so that UID `1000` maps to your host user. Rootless Podman also cannot bind port 80 as a non-root user, which is why the container listens on `8080`.
+### Without a container
 
-Then open:
-
-- `http://127.0.0.1:8080/`
-
-## Upgrading from 1.x
-
-- `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read: after the first start, set them in **Settings** in the admin panel. The server warns while they are still set.
-- Open `/admin` right after the first start and create the admin account: until then, whoever opens `/admin` first becomes the admin.
-- Behind a TLS proxy, set **Public URL** to the `https://` address and add the proxy to **Trusted proxies**, then restart: the admin cookie becomes `Secure`.
-- `data/` gains `admin/` and `storage/`; mount the whole directory and back it up.
-
-## Configuration
-
-Settings live in `data/admin/settings.json` and are edited in the **Settings** section of the admin panel. The file is created with the defaults on first start. A file that cannot be parsed, has an unknown field, or holds a value outside the allowed range stops startup and names the problem; a missing field takes its default.
-
-| Setting | Default | Allowed | Applies |
-| --- | --- | --- | --- |
-| `min_asset_duration_minutes` | `1` | 1 or more, not above the maximum | immediately |
-| `max_asset_duration_minutes` | `60` | up to 1440 | immediately |
-| `max_assets` | `1000` | 1 to 100000 | immediately |
-| `max_asset_size_bytes` | `3145728` (3 MiB) | 1 to 104857600 (100 MiB) | immediately |
-| `max_total_storage_bytes` | `536870912` (512 MiB) | not below `max_asset_size_bytes` | immediately |
-| `max_uploads_per_ip` | `10` | 1 to 10000 | immediately |
-| `max_file_size_bytes` | `1073741824` (1 GiB) | 1 to 107374182400 (100 GiB) | next file upload |
-| `max_files_total_bytes` | `10737418240` (10 GiB) | not below `max_file_size_bytes` | next file upload |
-| `max_file_duration_minutes` | `10080` (7 days) | 1 to 525600 (365 days) | next file upload |
-| `max_log_file_bytes` | `52428800` (50 MiB) | at least 1048576 (1 MiB) | next write |
-| `max_rotated_logs` | `10` | 0 to 1000 | next rotation |
-| `max_recent_activity` | `20` | 1 to 1000 | immediately |
-| `trusted_proxies` | `[]` | up to 64 IP addresses | immediately |
-| `admin_session_max_age_minutes` | `480` | 5 to 10080 | after restart |
-| `bind_addr` | `0.0.0.0` | an IP address | after restart |
-| `bind_port` | `8080` | 1 to 65535 | after restart |
-| `public_url` | `""` | empty, or `http(s)://host[:port]` without a path | immediately (links); the cookie flag after restart |
-| `tls_mode` | `"off"` | `"off"`, `"self_signed"`, `"files"` | after restart |
-| `tls_cert_path` | `""` | PEM certificate chain; required for `"files"` | after restart |
-| `tls_key_path` | `""` | PEM private key; required for `"files"` | after restart |
-| `https_port` | `8443` | 1 to 65535, not `bind_port` while TLS is on | after restart |
-| `max_login_failures` | `5` | 1 to 100 | immediately |
-| `login_lockout_minutes` | `15` | 1 to 1440 | immediately |
-| `max_request_uploads_per_ip_per_hour` | `30` | 1 to 10000 | immediately |
-
-When the server runs in a container, changing `bind_addr`, `bind_port`, or `https_port` also needs a matching port mapping (for example `-p 8443:8443`), or the server is unreachable after the restart.
-
-One environment variable is still read:
-
-| Environment Variable | Default | Description |
-| --- | --- | --- |
-| `ADMIN_COOKIE_SECURE` | unset | Forces the admin cookie's `Secure` flag (`true` or `false`); any other value stops startup. Unset, the flag follows the HTTPS setup (see [HTTPS](#https)). Keep it for emergencies |
-
-`BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; the server prints a warning if they are set.
-
-## HTTPS
-
-The first start serves plain HTTP. HTTPS is set up in **Address & HTTPS** in the admin panel:
-
-- **Public URL** (`public_url`): the address people use, like `https://share.example.com`. Every link copied from `/files` uses it, so a link copied while you work from a LAN address still works outside.
-- **HTTPS in this server** (`tls_mode`, after a restart):
-  - **Off**: plain HTTP. The right choice behind a reverse proxy that does TLS (Caddy, Traefik, nginx); the proxy gets and renews the certificate with ACME.
-  - **Self-signed**: a certificate generated in `data/admin/tls/` for the public URL's host, `localhost`, and `127.0.0.1`, regenerated when those names change. Browsers warn about it; the panel shows its SHA-256 fingerprint to compare.
-  - **Own certificate files**: PEM chain and key by path (inside the container, for example under `/data/admin/tls/`).
-- While HTTPS runs on `https_port`, the HTTP port answers every request with a `308` redirect to it.
-- If HTTPS cannot start (missing or mismatched files, port in use), the server serves plain HTTP and the panel shows the error, so the configuration can be fixed from the browser.
-
-The admin cookie is `Secure` when this server serves HTTPS, or when its TLS is off and the public URL starts with `https://` (a proxy in front does TLS). Browsers do not send `Secure` cookies over plain HTTP except to `localhost`, so after that restart log in through the HTTPS address. `ADMIN_COOKIE_SECURE` overrides the rule.
-
-**Behind Caddy**: keep HTTPS off here, set the public URL to the `https://` address, and add Caddy's IP to the trusted proxies.
-
-## Reverse Proxy
-
-Behind a reverse proxy, add the proxy IP to **Trusted proxies** in the admin panel (`trusted_proxies` in `settings.json`). Separate multiple proxies with commas. CIDR ranges are not supported, so give the proxy a fixed IP.
-
-```json
-"trusted_proxies": ["10.89.77.2"]
-```
-
-The client address used for upload limits and logs is resolved as follows:
-
-| Request comes from | Address used |
-| --- | --- |
-| A proxy in `trusted_proxies` | The last untrusted entry in `X-Forwarded-For`, or the proxy IP if there is none |
-| Any other peer | The connection IP; forwarding headers are ignored |
-
-Without `trusted_proxies`, every client appears to come from the proxy and all of them share one upload limit.
-
-Do not enable an option that makes the proxy trust incoming forwarding headers, such as `forwardedHeaders.trustedIPs` in Traefik or `trusted_proxies` in Caddy, unless another proxy sits in front of it.
-
-Traefik labels:
-
-```yaml
-labels:
-  - "traefik.enable=true"
-  - "traefik.http.routers.bhs.rule=Host(`bhs.example.com`)"
-  - "traefik.http.services.bhs.loadbalancer.server.port=8080"
-```
-
-Caddyfile:
-
-```text
-bhs.example.com {
-    reverse_proxy bhs:8080
-}
-```
-
-## Web Endpoints
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/` | Upload page |
-| `GET` | `/bhs/{id}` | View a shared asset |
-| `GET` | `/stats` | Statistics dashboard |
-| `GET` | `/admin` | Admin control panel (login required) |
-| `GET` | `/files` | File sharing for the admin (login required) |
-| `GET` | `/f/{id}` | Download page of a shared file |
-| `GET` | `/r/{id}` | Upload page of an upload request |
-
-Unknown paths return the error page with status `404`.
-
-## API
-
-### Upload
-
-`POST /api/upload`
-
-Request body:
-
-```json
-{
-  "duration": 5,
-  "content_type": "text/plain",
-  "content": "hello world"
-}
-```
-
-For images, `content` must be a base64-encoded payload string and `content_type` must be one of `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/avif`, or `image/bmp`. The only accepted text type is `text/plain`. SVG and HTML are rejected because they can run scripts.
-
-Successful response:
-
-```json
-{
-  "link": "/bhs/550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-Possible error responses include:
-
-- `400 Bad Request` for invalid JSON or invalid base64 input
-- `413 Payload Too Large` for assets above `max_asset_size_bytes`
-- `415 Unsupported Media Type` for a body that is not `application/json`, or a `content_type` that is not allowed
-- `429 Too Many Requests` when the active upload limit is exceeded
-- `503 Service Unavailable` when the in-memory storage is full
-
-The requested duration is clamped to the configured range, `1..=60` minutes by default.
-
-### Limits
-
-`GET /api/limits`
-
-Returns the current upload limits, which the upload page uses for its duration slider:
-
-```json
-{
-  "min_duration_minutes": 1,
-  "max_duration_minutes": 60,
-  "max_asset_size_bytes": 3145728
-}
-```
-
-### Fetch Shared Content
-
-`GET /api/content/{id}`
-
-Returns the raw content with the stored MIME type and a sandbox `Content-Security-Policy`. Returns `400` if `{id}` is not a valid UUID, or `404` if the asset has expired or does not exist.
-
-### Shared Files
-
-`GET /api/files/{id}/info`
-
-Public details of a shared file: `name`, `size`, `expires_at`, `valid_from` (or `null`), `available`, `downloads_left` (or `null` when unlimited), and `encrypted`. Times are Unix milliseconds. Returns `404` when the file does not exist, has expired, or reached its download limit.
-
-`GET /api/files/{id}`
-
-Sends the whole file as `application/octet-stream` with `Content-Disposition: attachment` and a sandbox `Content-Security-Policy`, so a browser always saves it and never renders it.
-
-- Every request is one counted download. `Range` requests are not supported on purpose: a download limit could otherwise be bypassed by fetching the file in pieces, so an interrupted download restarts from the beginning.
-- When the last allowed download starts, the file is deleted; that download still completes.
-- `403` with `valid_from` before the opening time, `404` as above, `400` for an invalid id.
-- An encrypted file is refused with `403` and `"encrypted": true`: use the POST route below.
-
-`POST /api/files/{id}` with the form body `key=<file key>`
-
-Downloads an encrypted file, decrypted while it is sent; the response is the same as for the GET route. The key goes in the body so it never appears in a URL, a browser history, or an access log. The key is checked on the first chunk before the download is counted: a wrong key gets `403` and does not use up a download; a key that is not 43 base64url characters gets `400`. If the stored file was changed on disk, the decryption fails and the response is cut short instead of delivering a corrupted file.
-
-`POST /api/files/{id}/check` with the form body `key=<file key>`
-
-Checks a key without downloading: `204` when it opens the file, `403` for a wrong key, `400` for a file that is not encrypted or a malformed key, `404` and `403` (opening time) as above. The download page calls it before starting the download.
-
-### Upload Requests
-
-`GET /api/requests/{id}`
-
-What the upload page of a request shows: `title`, `message`, `max_file_size_bytes` (the request's limit, or the per-file limit in the settings if lower), `max_total_bytes` and `bytes_left` (all files together), `extensions` (empty means any type), `files_left` (or `null` when unlimited), `require_name`, and `expires_at` (or `null`). `404` when the request does not exist or was closed.
-
-`POST /api/requests/{id}/files?name=&uploader=`
-
-Raw file bytes as the body, `Content-Length` required (`411` without it). No login: the request id is the permission. The file is encrypted for the admin as it arrives and never gets a public link.
-
-- `201` with `name` and `size`.
-- `400` for a missing name, a missing uploader name when the request requires one, or a body that does not match its length.
-- `410` when the request has received all the files it accepts, `404` when it does not exist.
-- `413` over the request's per-file limit, or over what is left of its total (with `bytes_left`); `415` for an extension the request does not accept; `507` when the storage budget is full.
-- `429` with `Retry-After` when the client sent `max_request_uploads_per_ip_per_hour` files in the last hour.
-- `503` while the admin has no encryption keys yet (they are created at the admin's next login).
-
-### Stats
-
-`GET /api/stats`
-
-Returns counters and recent activity kept in memory since the last startup, including:
-
-- active assets
-- total uploads
-- total deleted
-- storage bytes
-- image count
-- text count
-- total requests
-- recent upload and delete events
-
-## Logging
-
-Every log event is written to the log file and, as the same JSON line, to standard output, so `docker logs` and `podman logs` show it.
-
-Logs are written as JSON lines to:
-
-```text
-data/logs/log.txt
-```
-
-Logged event types:
-
-- HTTP requests
-- asset uploads
-- asset deletions
-- error events
-- admin actions: setup, login, failed login, logout, password change, asset deletion, settings change (with the old and new value of each changed field), file upload and deletion
-- shared file events: download (with the client IP and the download count) and expiry
-
-On startup, an existing log file is renamed with a UTC timestamp before a new `log.txt` is created. The same rotation happens while running when `log.txt` reaches `max_log_file_bytes` (50 MiB by default). Only the `max_rotated_logs` most recent rotated logs are kept (10 by default); older ones are deleted.
-
-## Admin Panel
-
-Open `/admin`. Uploading, viewing, and the public stats stay open to everyone; only the panel requires a login.
-
-### First login
-
-While no admin account exists, `/admin` shows a form that creates it, and the server prints `Admin credentials not set` at startup. **Whoever opens `/admin` first becomes the admin**, so create the account right after the first start, before exposing the service.
-
-There is a single admin account. Its credentials are stored in `data/admin/credentials.json` (username, an Argon2id password hash, and the key pair for [encrypted files](#encrypted-files), file mode `0600`). To reset them, stop the server, delete that file, and start again: the setup form appears again. A credentials file that cannot be read stops startup instead of reopening the setup.
-
-### Sessions
-
-- Login sets the `bhs_admin` cookie: encrypted with the key in `data/admin/session.key`, `HttpOnly`, `SameSite=Strict`, limited to `/api/admin`, and `Secure` as described in [HTTPS](#https).
-- A session lasts at most `admin_session_max_age_minutes` (8 hours by default).
-- Logging out or changing the password ends every admin session, on every device.
-- Browsers accept `Secure` cookies on `http://localhost` and `http://127.0.0.1` only. Once the cookie is `Secure`, log in through the HTTPS address.
-- Too many wrong passwords from one client return `429` with `Retry-After` until the lockout ends.
-
-### Features
-
-- Usage cards: active assets, storage, totals since startup
-- Active uploads grouped by uploader IP
-- Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
-- Tabs: **Overview** (usage, uploads by IP, active assets, shared file storage), **Settings**, **Account** (password); the tab is kept in the URL (`/admin#settings`)
-- The admin bar on every page links the services first (Upload, Files) and then Stats and Admin
-
-### File sharing page
-
-`/files` is a service page, separate from the panel's management tabs. Without an admin session it only shows a link to the login; the file API refuses every request without a session anyway.
-
-- Drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time
-- Upload with progress, speed, and cancel
-- Tabs: **Share** (your files with a public link), **Requests** (links that let others send you files), **Received** (what they sent)
-- Optional encryption with a new random key per file; the key is shown once after the upload (hidden behind dots, with Show and Copy) and can be shown again later with the admin password
-- List of shared files with downloads, status, key, copy link, and delete
-- Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
-- Password change
-
-### Encrypted files
-
-Encryption is chosen per file at upload time. It happens on the server: the downloader only needs a browser and the key.
-
-- Each file gets its own random 256-bit key. The content is encrypted with AES-256-GCM in 64 KiB chunks while it is uploaded, so neither the upload nor the download holds the file in memory and no plaintext copy is ever written to disk. Each chunk's nonce encodes its position and whether it is the last one, so chunks cannot be reordered, dropped, or appended.
-- The key is returned once, as 43 base64url characters. Send it to the downloader separately from the link; the download page asks for it.
-- So the admin can show the key again, it is also stored in `data/storage/index.json` encrypted for the admin's X25519 public key. The matching private key is kept in `data/admin/credentials.json`, encrypted with a key derived from the admin password (Argon2id). Showing a key needs the password, not only a session.
-- Without the admin password, nothing on disk reveals a file key: a copy of the `data/` volume does not expose encrypted files.
-- Changing the password re-encrypts the private key; keys of files shared before still open. Credentials created before encryption existed get their key pair at the next login.
-- **If the credentials file is deleted** (password reset), stored keys can no longer be shown; downloaders who already have a key can still download.
-- The server sees the content and the key while it encrypts and decrypts. Over plain HTTP the key travels unencrypted on the network: use HTTPS.
-
-### Upload requests
-
-A request is a link (`/r/{id}`) that lets someone without an account send you files.
-
-- You set a title, an optional message, the total size of all files (100 MB by default), the largest single file (the total when empty), the accepted extensions (empty: any), an optional number of files, an optional time the link stays open, and whether the uploader's name is required. The link closes when it is full (files or bytes), expires, or you close it.
-- Uploads in progress count against the total too, so files sent at the same time cannot go over it together.
-- The extension is checked on the file name only. It is what the uploader called the file, not proof of its content.
-- Every received file is encrypted on arrival for your X25519 public key (the same key pair as for [encrypted files](#encrypted-files)): nothing on disk can be read without your password. Downloading one asks for the password; the file is decrypted while it is sent.
-- Received files never have a public link and do not expire; they count against `max_files_total_bytes` until you delete them. Closing a request keeps the files it received.
-- Each received file records the request, the uploader's name, and the uploader's IP address.
-
-### Restart
-
-**Settings → Server → Restart server** applies the fields marked *restart* without touching the container:
-
-- The server stops accepting connections; requests in progress, downloads included, get up to 30 seconds to finish.
-- It then replaces itself with a fresh start of the same program (`exec`). The PID stays the same, so a container keeps running without a restart policy, and admin sessions stay valid.
-- The page waits for the new process and reloads; when HTTPS turns on or off, it goes to the new address.
-- If the saved address or ports cannot be used, the server does not come back and has to be started by hand, as after any start with that configuration. A failing HTTPS setup still falls back to plain HTTP.
-
-### Admin API
-
-All routes are under `/api/admin`, take and return JSON, and are never cached.
-
-| Method | Path | Login | Description |
-| --- | --- | --- | --- |
-| `GET` | `/status` | no | `configured`, `authenticated`, `username`, `started_at` (when the server process started, Unix ms) |
-| `POST` | `/restart` | yes | `202`, then the server stops gracefully and starts again in the same process (see [Restart](#restart)). Logged |
-| `POST` | `/setup` | no | `{ "username", "password" }`; only while no account exists, otherwise `409` |
-| `POST` | `/login` | no | `{ "username", "password" }`; `401` on wrong credentials |
-| `POST` | `/logout` | yes | Ends every admin session |
-| `POST` | `/password` | yes | `{ "current_password", "new_password" }`; `403` if the current password is wrong |
-| `GET` | `/assets` | yes | Active assets |
-| `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
-| `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
-| `GET` | `/settings` | yes | `current` (saved), `running` (in use since startup), and `defaults` settings, `restart_fields`, and `restart_pending` |
-| `POST` | `/files?name=&duration_minutes=&max_downloads=&valid_from=&encrypt=` | yes | Raw file bytes as the body, `Content-Length` required (`411` without it). `duration_minutes` counts from `valid_from` (Unix ms) when given. With `encrypt=true` the file is encrypted and the response includes its `key`, returned only here. `201` with the file and its `link`; `400` invalid input or a body that does not match its length, `413` over `max_file_size_bytes`, `507` over `max_files_total_bytes` (encrypted files count 16 bytes more per 64 KiB), `409` when the encryption keys do not exist yet (log in again) |
-| `GET` | `/files` | yes | Shared files that have not expired, with downloads, `encrypted`, and `link` |
-| `POST` | `/files/{id}/key` | yes | `{ "password" }`; `200` with the `key` of an encrypted file, `403` if the password is wrong, `400` if the file is not encrypted, `404` if missing. Logged |
-| `DELETE` | `/files/{id}` | yes | Delete a shared file now; `204`, `400` for an invalid id, `404` if missing |
-| `POST` | `/requests` | yes | `{ "title", "message", "max_total_bytes", "max_file_size_bytes", "extensions": [], "max_files", "require_name", "expires_in_minutes" }`. `max_total_bytes` defaults to 100 MiB and may not exceed `max_files_total_bytes`; `max_file_size_bytes` defaults to the total, may not exceed it nor the per-file limit. `201` with the request, `files_left`, and its `link`; `400` with an `error` when invalid |
-| `GET` | `/requests` | yes | Upload requests, newest first, with `uploads`, `files_left`, and `link` |
-| `DELETE` | `/requests/{id}` | yes | Close a request: its link stops accepting files; received files stay. `204`, `404` if missing |
-| `GET` | `/received` | yes | Received files, newest first: `id`, `name`, `size`, `received_at`, `request_id`, `request_title`, `uploader`, `ip` |
-| `POST` | `/received/check` | yes | `{ "password" }`; `204` if it unlocks the admin key, `403` if not. The page calls it before a download |
-| `POST` | `/received/{id}/download` | yes | Form body `password=`; the decrypted file as an attachment. `403` wrong password, `404` if missing. Logged |
-| `DELETE` | `/received/{id}` | yes | Delete a received file; `204`, `404` if missing |
-| `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
-
-Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.
-
-## Notes
-
-- This service is designed for short-lived sharing, not durable storage.
-- There is currently no persistent asset backend.
-- Wrong admin passwords are logged and limited per client: after `max_login_failures` the client waits `login_lockout_minutes`. The count covers login, password change, showing a file key, and downloading a received file. IPv6 clients are counted per /64.
-- Uploads through request links are limited to `max_request_uploads_per_ip_per_hour` per client (IPv6 per /64); the per-IP limit of public uploads counts IPv6 per /64 too.
-- The repository includes frontend assets under `data/html/`; if those files are missing, the web UI will not render correctly.
-
-## Development
-
-Run the automated tests from the project root:
+Requirements: a Rust toolchain, the `data/html/` directory from this repository, and write access to `data/`.
 
 ```bash
-cargo test
+cargo run --release
 ```
+
+### First start
+
+1. Open `http://127.0.0.1:8080/admin` and **create the admin account right away**: until it exists, whoever opens `/admin` first becomes the admin.
+2. In **Settings → Address & HTTPS**, set the **Public URL** people use (for example `https://share.example.com`). Behind a reverse proxy, also add its IP to **Trusted proxies**.
+3. To serve HTTPS from the server itself, choose a self-signed certificate or your own files, then press **Restart server**. Port `8443` must be published.
+
+**Back up `data/`**: it holds the admin credentials and the key that decrypts received files. Without `data/admin/credentials.json`, those files cannot be read again.
+
+Upgrading from 1.x: `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; see [Upgrading from 1.x](docs/configuration.md#upgrading-from-1x).
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [Configuration](docs/configuration.md) | Every setting, limits, HTTPS, reverse proxy, upgrading from 1.x |
+| [Admin panel](docs/admin.md) | Login and sessions, file sharing, encryption, upload requests, restart |
+| [API](docs/api.md) | Web endpoints, public API, admin API |
+| [Architecture](docs/architecture.md) | How it works, runtime behavior, logging, project layout, development |
+| [Block diagram](docs/block-diagram.md) | Component diagram |
+| [Changelog](CHANGELOG.md) | Release notes |

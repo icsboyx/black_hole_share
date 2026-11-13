@@ -1,5 +1,7 @@
 # Block Diagram
 
+[README](../README.md) · [Configuration](configuration.md) · [Admin](admin.md) · [API](api.md) · [Architecture](architecture.md)
+
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"lineColor": "#33ccff", "fontFamily": "JetBrains Mono, Fira Code, monospace"}, "flowchart": {"wrappingWidth": 400}}}%%
 flowchart TD
@@ -7,82 +9,91 @@ flowchart TD
         Client["Browser or API client"]
         Proxy["Reverse proxy (optional)"]
         HtmlFiles[("data/html/")]
-        LogFiles[("data/logs/")]
-        AdminFiles[("data/admin/")]
-        StorageFiles[("data/storage/")]
+        LogFiles[("data/logs/ + stdout")]
+        AdminFiles[("data/admin/<br/>credentials, session key,<br/>settings, tls/")]
+        StorageFiles[("data/storage/<br/>files, index.json,<br/>requests.json")]
 
         subgraph Process["Application"]
+            subgraph Listeners["Listeners"]
+                Http["HTTP (bind_port)"]
+                Https["HTTPS (https_port, optional)<br/>self-signed or PEM files"]
+            end
+
             subgraph Web["Actix Web server"]
-                Headers["Security headers"]
+                Headers["Security headers<br/>+ HTTP to HTTPS redirect"]
                 Pages["Pages and static files"]
-                Upload["POST /api/upload"]
-                Content["GET /api/content/{id}"]
-                Stats["GET /api/stats"]
-                Limits["GET /api/limits"]
-                FileApi["GET /api/files/{id}"]
-                Admin["/api/admin/* (session cookie)"]
+                PublicApi["Public assets<br/>/api/upload, /api/content/{id},<br/>/api/limits, /api/stats"]
+                FileApi["Shared files<br/>/api/files/{id} (+ key)"]
+                RequestApi["Upload requests<br/>/api/requests/{id}"]
+                Admin["/api/admin/* (session cookie)<br/>settings, files, requests,<br/>received, restart"]
             end
 
-            subgraph Background["Background task"]
+            subgraph Background["Background tasks"]
                 Cleanup["Cleanup loop, every second"]
+                Restart["Restart: graceful stop + exec"]
             end
 
-            subgraph State["Shared state"]
+            subgraph Memory["In-memory state, lost on restart"]
                 Store["In-memory asset store"]
-                Limit["Per-IP rate limiter"]
+                Limit["Per-IP upload limiter"]
+                Throttle["Throttles: password lockout,<br/>request uploads per hour"]
+                Counters["Stats counters"]
                 Logger["Log writer"]
-                Counters["In-memory stats counters"]
-                Creds["Admin credential store"]
+            end
+
+            subgraph Persistent["Stores kept on disk"]
+                Creds["Admin credentials<br/>+ X25519 key pair"]
                 Settings["Settings store"]
-                Files["Shared file store"]
+                Files["File store<br/>(shared + received, AES-GCM)"]
+                Requests["Upload request store"]
             end
         end
     end
 
     Client --> Proxy
-    Proxy --> Headers
-    Client --> Headers
+    Proxy --> Http
+    Client --> Http
+    Client --> Https
+    Http --> Headers
+    Https --> Headers
 
     Headers --> Pages
-    Headers --> Upload
-    Headers --> Content
-    Headers --> Stats
-    Headers --> Limits
+    Headers --> PublicApi
     Headers --> FileApi
+    Headers --> RequestApi
     Headers --> Admin
 
-    Admin --> Creds
-    Admin --> Store
-    Admin --> Limit
-    Admin --> Logger
-    Creds --> AdminFiles
-    Admin --> Settings
-    Settings --> AdminFiles
-    Admin --> Files
-    FileApi --> Files
-    Files --> StorageFiles
-    Cleanup --> Files
-
     Pages --> HtmlFiles
-    Pages --> Logger
+    Headers -. "every request and event" .-> Logger
 
-    Upload --> Settings
-    Upload --> Limit
-    Upload --> Store
-    Upload --> Logger
+    PublicApi --> Store
+    PublicApi --> Limit
+    PublicApi --> Settings
 
-    Content --> Store
-    Content --> Logger
+    FileApi --> Files
 
-    Stats --> Store
-    Stats --> Counters
+    RequestApi --> Requests
+    RequestApi --> Throttle
+    RequestApi --> Creds
+    RequestApi --> Files
 
-    Limits --> Settings
+    Admin --> Creds
+    Admin --> Throttle
+    Admin --> Settings
+    Admin --> Store
+    Admin --> Files
+    Admin --> Requests
+    Admin --> Restart
 
     Cleanup --> Store
     Cleanup --> Limit
-    Cleanup --> Logger
+    Cleanup --> Files
 
+    Creds --> AdminFiles
+    Settings --> AdminFiles
+    Https --> AdminFiles
+    Files --> StorageFiles
+    Requests --> StorageFiles
     Logger --> Counters
     Logger --> LogFiles
 
@@ -92,28 +103,30 @@ flowchart TD
     classDef state fill:#1a1a1a,stroke:#00ff99,stroke-width:2px,color:#cdd6f4
 
     class Client,Proxy,HtmlFiles,LogFiles,AdminFiles,StorageFiles external
-    class Headers,Pages,Upload,Content,Stats,Limits,FileApi,Admin web
-    class Cleanup task
-    class Store,Limit,Logger,Counters,Creds,Settings,Files state
+    class Http,Https,Headers,Pages,PublicApi,FileApi,RequestApi,Admin web
+    class Cleanup,Restart task
+    class Store,Limit,Throttle,Logger,Counters,Creds,Settings,Files,Requests state
 
     style Overview fill:#1a1a1a,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Process fill:#1e1e2e,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
+    style Listeners fill:#1e1e2e,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Web fill:#1e1e2e,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Background fill:#1e1e2e,stroke:#a6adc8,stroke-width:2px,color:#a6adc8
-    style State fill:#1e1e2e,stroke:#00ff99,stroke-width:2px,color:#00ff99
+    style Memory fill:#1e1e2e,stroke:#00ff99,stroke-width:2px,color:#00ff99
+    style Persistent fill:#1e1e2e,stroke:#00ff99,stroke-width:2px,color:#00ff99
 
     linkStyle default stroke:#33ccff,stroke-width:2px
 ```
 
-- The Actix Web server handles all HTTP traffic, including the pages and the API calls made by their JavaScript.
-- The cleanup loop is a separate task that runs without any HTTP request.
-- The web server and the cleanup loop use the same shared state.
-- Assets, rate limits, and stats counters live only in memory and are lost on restart.
-- `/api/stats` reads memory only. The log files are written but never read back.
-- The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in `trusted_proxies`.
-- Settings are loaded from `data/admin/settings.json` at startup and changed through `/api/admin/settings`; uploads, the rate limiter, and the log writer read the current values.
-- Shared files and their index live in `data/storage/`; the store reconciles the index with the directory at startup and the cleanup loop deletes expired files.
-- Upload requests live in `data/storage/requests.json`; files received through them are stored with the shared files, always encrypted for the admin, and excluded from every public route.
-- HTTPS is optional and set at startup from the settings (`tls.rs`): off, self-signed, or PEM files; when it runs, a middleware redirects plain HTTP to it. Per-client limits (`throttle.rs`) guard password prompts and request uploads.
+- The Actix Web server handles all HTTP traffic, including the pages and the API calls made by their JavaScript. Every route writes to the log writer, which also prints each event to standard output.
+- HTTPS is optional and set at startup from the settings (`tls.rs`): off (the choice behind a TLS proxy), a self-signed certificate kept in `data/admin/tls/`, or PEM files. While it runs, plain HTTP is redirected to it with `308`; if it cannot start, the server serves plain HTTP only and the panel shows the error.
+- The cleanup loop runs without any HTTP request and deletes expired assets and expired shared files.
+- `POST /api/admin/restart` stops the server gracefully and replaces the process with a fresh start of the same binary (`exec`, same PID).
+- Assets, upload limits, throttles, and stats counters live only in memory and are lost on restart. `/api/stats` reads memory only; the log files are written but never read back.
+- The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in `trusted_proxies`. Limits and throttles count an IPv6 client per /64.
+- Settings are loaded from `data/admin/settings.json` at startup and changed through `/api/admin/settings`; uploads, limits, and the log writer read the current values.
+- Shared files and their index live in `data/storage/`; the store reconciles the index with the directory at startup.
+- Upload requests live in `data/storage/requests.json`. Files received through them are stored with the shared files, always encrypted for the admin, and excluded from every public route.
 - Encrypted files are stored as AES-256-GCM chunks; their keys are wrapped for the admin's X25519 public key, whose private key in `data/admin/credentials.json` is protected by the admin password.
-- Admin credentials, the session key, the settings, and the shared files are the state kept on disk besides logs; everything else is lost on restart.
+- Wrong admin passwords (login and every password prompt) and uploads to request links are limited per client by `throttle.rs`.
+- On disk, besides the logs: admin credentials, the session key, the settings, and the self-signed certificate in `data/admin/`; shared and received files, their index, and the upload requests in `data/storage/`.
