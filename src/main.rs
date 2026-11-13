@@ -25,7 +25,7 @@ use actix_web::{
 
 use anyhow::Result;
 use mime_guess::from_path;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     env, fs,
     net::{IpAddr, SocketAddr},
@@ -43,6 +43,8 @@ pub static TLS_DIR: &str = "data/admin/tls/";
 pub static STORAGE_DIR: &str = "data/storage/";
 pub static REQUESTS_FILE: &str = "data/storage/requests.json";
 pub static LOG_FILE_NAME: &str = "log.txt";
+// Set on the process started by a restart from the admin panel.
+const RESTARTED_ENV: &str = "BHS_RESTARTED";
 // Limits and bind address now live in SETTINGS_FILE; these variables are no longer read.
 static IGNORED_ENV_VARS: &[&str] = &["BIND_ADDR", "BIND_PORT", "TRUSTED_PROXIES"];
 
@@ -338,6 +340,22 @@ async fn main() -> Result<()> {
             }
         }
     });
+    // Written once the listeners are bound, so the new log file shows that the server came
+    // (back) up and how; after a restart from the panel it is the first line.
+    let started = json!({
+        "action": "started",
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "restarted": env::var_os(RESTARTED_ENV).is_some(),
+        "http": SocketAddr::from(bind).to_string(),
+        "https": app_state
+            .tls_status
+            .active
+            .then(|| SocketAddr::from((startup.bind_addr, startup.https_port)).to_string()),
+        "tls_mode": app_state.tls_status.mode,
+        "tls_error": app_state.tls_status.error,
+    });
+    let log_file = app_state.log_file.clone();
     let mut server = HttpServer::new(move || {
         App::new()
             .wrap(from_fn(redirect_plain_http))
@@ -350,6 +368,11 @@ async fn main() -> Result<()> {
         server = server.listen_rustls_0_23(listener, config)?;
     }
     let server = server.run();
+    log_file
+        .write_event(LogEventType::Server(started))
+        .await
+        .unwrap_or_else(|e| eprintln!("Failed to log the server start: {e}"));
+
 
     // The restart button stops the server gracefully: no new connections, and requests in
     // progress (downloads included) get up to the shutdown timeout to finish.
@@ -387,6 +410,7 @@ fn restart_process() -> Result<()> {
     // `exec` returns only when it fails.
     let error = std::process::Command::new(&program)
         .args(env::args_os().skip(1))
+        .env(RESTARTED_ENV, "1")
         .exec();
     Err(anyhow::anyhow!(
         "cannot restart {}: {error}",

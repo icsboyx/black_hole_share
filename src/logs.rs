@@ -81,8 +81,11 @@ impl LogStats {
             LogEventType::HttpRequest(_) => self.total_requests += 1,
             LogEventType::AssetUploaded(_) => self.total_uploads += 1,
             LogEventType::AssetDeleted(_) => self.total_deleted += 1,
-            // Admin actions and shared files stay out of the public stats.
-            LogEventType::Error(_) | LogEventType::Admin(_) | LogEventType::File(_) => return,
+            // Admin actions, shared files, and server events stay out of the public stats.
+            LogEventType::Error(_)
+            | LogEventType::Admin(_)
+            | LogEventType::File(_)
+            | LogEventType::Server(_) => return,
         }
         if !matches!(log_event.event, LogEventType::HttpRequest(_)) {
             self.recent_activity.push_back(log_event.clone());
@@ -281,6 +284,9 @@ pub enum LogEventType {
     Admin(Value),
     /// Shared file events: upload, download, deletion.
     File(Value),
+    /// Server lifecycle: written once at every start, so the log shows when the server came
+    /// (back) up and with which listeners.
+    Server(Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

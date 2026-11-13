@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-13
+
+### Added
+
+- A `Server` log event at every start, written as the first line of the new log file and to standard output: version, process ID, `restarted` (true after **Restart server**), the HTTP and HTTPS addresses, the TLS mode, and the HTTPS error, if any. After a restart from the panel, the log now shows that the server came back up.
+
+### Changed
+
+- The documentation moved from the README to `docs/` (configuration, admin panel, API, architecture); the README keeps the overview and how to start the server.
+
 ## [2.0.0] - 2026-11-13
 
 ### Breaking changes

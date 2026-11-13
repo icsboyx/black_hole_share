@@ -75,6 +75,7 @@ Logged event types:
 - asset uploads
 - asset deletions
 - error events
+- server start: the first line of every new log file, with the version, the process ID, whether it follows a restart from the admin panel, the HTTP and HTTPS addresses, the TLS mode, and why HTTPS did not start (if it did not)
 - admin actions: setup, login, failed login, logout, password change, asset deletion, settings change (with the old and new value of each changed field), file upload and deletion, file key shown (and failed attempts), server restart, request created and closed, received file downloaded and deleted
 - shared file events: download (with the client IP and the download count), file received through a request (with the request, uploader name, and IP), and expiry
 

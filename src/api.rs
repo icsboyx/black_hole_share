@@ -260,7 +260,8 @@ async fn api_stats(app_state: web::Data<AppState>) -> Result<HttpResponse, actix
                 LogEventType::HttpRequest(_)
                 | LogEventType::Error(_)
                 | LogEventType::Admin(_)
-                | LogEventType::File(_) => {
+                | LogEventType::File(_)
+                | LogEventType::Server(_) => {
                     return None;
                 }
             };

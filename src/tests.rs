@@ -263,6 +263,23 @@ async fn stats_come_from_memory_not_from_the_log_file() {
 }
 
 #[actix_web::test]
+async fn server_start_is_logged_but_not_counted_in_stats() {
+    let dir = temp_dir();
+    let log = LogFile::new(dir.join("log.txt")).await.unwrap();
+    log.write_event(LogEventType::Server(json!({ "action": "started", "restarted": true })))
+        .await
+        .unwrap();
+
+    let line = fs::read_to_string(dir.join("log.txt")).unwrap();
+    let event: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(event["event"]["Server"]["action"], "started");
+    assert_eq!(event["event"]["Server"]["restarted"], true);
+    let stats = log.stats().await;
+    assert_eq!(stats.total_requests, 0);
+    assert!(stats.recent_activity.is_empty());
+}
+
+#[actix_web::test]
 async fn log_rotates_by_size_and_keeps_a_bounded_history() {
     let dir = temp_dir();
     let limits = LogLimits { max_bytes: 100, max_rotated: 2, ..LogLimits::default() };
