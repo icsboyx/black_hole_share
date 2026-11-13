@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `docker-compose.yaml` restarts the container after a crash or a host reboot (`restart: unless-stopped`).
 - The documentation moved from the README to `docs/` (configuration, admin panel, API, architecture); the README keeps the overview and how to start the server.
 
 ## [2.0.0] - 2026-11-13

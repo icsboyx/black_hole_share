@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: black_hole_share
+    restart: unless-stopped
     volumes:
       - ./data:/data
       - /etc/localtime:/etc/localtime:ro
