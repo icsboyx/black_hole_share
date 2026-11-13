@@ -202,16 +202,32 @@
       margin-bottom: 0;
     }
 
-    .settings-group {
-      margin-top: 18px;
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+      border-bottom: 1px solid var(--inactive-gray);
     }
 
-    .settings-group h3 {
+    .tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
       color: var(--text-secondary);
-      font-size: 0.85em;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin: 0 0 10px 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.95em;
+      padding: 8px 14px;
+    }
+
+    .tab:hover {
+      color: var(--text-primary);
+    }
+
+    .tab[aria-selected="true"] {
+      border-bottom-color: var(--accent-cyan);
+      color: var(--accent-cyan);
+      font-weight: bold;
     }
 
     .settings-grid {
@@ -309,59 +325,66 @@
       </section>
 
       <section id="dashboardView" hidden>
-        <!-- User name and Log out live in the admin bar (nav.js). -->
-        <div class="toolbar">
-          <button id="refreshBtn" class="small-btn" type="button">Refresh</button>
+        <div class="tabs" role="tablist">
+          <button class="tab" type="button" role="tab" id="tabBtn-overview" aria-controls="tab-overview"
+            data-tab="overview">Overview</button>
+          <button class="tab" type="button" role="tab" id="tabBtn-settings" aria-controls="tab-settings"
+            data-tab="settings">Settings</button>
+          <button class="tab" type="button" role="tab" id="tabBtn-account" aria-controls="tab-account"
+            data-tab="account">Account</button>
         </div>
 
-        <div id="statsGrid" class="stats-grid"></div>
+        <div id="tab-overview" role="tabpanel" aria-labelledby="tabBtn-overview">
+          <!-- User name and Log out live in the admin bar (nav.js). -->
+          <div class="toolbar">
+            <button id="refreshBtn" class="small-btn" type="button">Refresh</button>
+          </div>
 
-        <div class="panel">
-          <h2>Active uploads by IP</h2>
-          <div class="table-wrap" id="uploadersTable"></div>
+          <div id="statsGrid" class="stats-grid"></div>
+
+          <div class="panel">
+            <h2>Active uploads by IP</h2>
+            <div class="table-wrap" id="uploadersTable"></div>
+          </div>
+
+          <div class="panel">
+            <h2>Active assets</h2>
+            <p id="assetsMessage" class="message"></p>
+            <div class="table-wrap" id="assetsTable"></div>
+          </div>
         </div>
 
-        <div class="panel">
-          <h2>Active assets</h2>
-          <p id="assetsMessage" class="message"></p>
-          <div class="table-wrap" id="assetsTable"></div>
+        <div id="tab-settings" role="tabpanel" aria-labelledby="tabBtn-settings" hidden>
+          <p class="hint" style="margin-top: 16px">Saved to data/admin/settings.json. Each section is saved on its
+            own. Fields marked <span class="restart-tag">restart</span> take effect after the server restarts; all
+            others apply immediately.</p>
+          <p id="settingsMessage" class="message"></p>
+          <div id="settingsSections"></div>
         </div>
 
-        <div class="panel" id="settingsPanel">
-          <h2>Settings</h2>
-          <p class="hint">Saved to data/admin/settings.json. Fields marked <span class="restart-tag">restart</span>
-            take effect after the server restarts; all others apply immediately.</p>
-          <form id="settingsForm" novalidate>
-            <div id="settingsFields"></div>
-            <p id="settingsMessage" class="message"></p>
-            <div class="settings-actions">
-              <button id="settingsReset" class="small-btn" type="button">Discard changes</button>
-              <button class="small-btn" type="submit">Save settings</button>
-            </div>
-          </form>
-        </div>
-
-        <div class="panel">
-          <h2>Change password</h2>
-          <p class="hint">Changing the password logs out every other session.</p>
-          <form id="passwordForm" class="password-form">
-            <div class="form-row">
-              <label for="currentPassword">Current</label>
-              <input id="currentPassword" type="password" autocomplete="current-password" required />
-            </div>
-            <div class="form-row">
-              <label for="newPassword">New</label>
-              <input id="newPassword" type="password" autocomplete="new-password" required minlength="8"
-                maxlength="256" />
-            </div>
-            <div class="form-row">
-              <label for="confirmPassword">Repeat new</label>
-              <input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8"
-                maxlength="256" />
-            </div>
-            <button class="small-btn" type="submit">Change</button>
-          </form>
-          <p id="passwordMessage" class="message"></p>
+        <div id="tab-account" role="tabpanel" aria-labelledby="tabBtn-account" hidden>
+          <div class="panel">
+            <h2>Change password</h2>
+            <p class="hint">Changing the password logs out every other session.</p>
+            <form id="passwordForm" class="password-form">
+              <div class="form-row">
+                <label for="currentPassword">Current</label>
+                <input id="currentPassword" type="password" autocomplete="current-password" required />
+              </div>
+              <div class="form-row">
+                <label for="newPassword">New</label>
+                <input id="newPassword" type="password" autocomplete="new-password" required minlength="8"
+                  maxlength="256" />
+              </div>
+              <div class="form-row">
+                <label for="confirmPassword">Repeat new</label>
+                <input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8"
+                  maxlength="256" />
+              </div>
+              <button class="small-btn" type="submit">Change</button>
+            </form>
+            <p id="passwordMessage" class="message"></p>
+          </div>
         </div>
       </section>
     </div>
@@ -487,6 +510,7 @@
         show("loginView");
       } else {
         show("dashboardView");
+        selectTab(location.hash.slice(1));
         // Settings load once per login; the periodic refresh must not overwrite edits.
         await Promise.all([loadDashboard(), loadSettings()]);
       }
@@ -557,11 +581,15 @@
     }
 
     const MIB = 1024 * 1024;
-    // kind: "int" (whole number), "mib" (bytes shown in MiB), "ip" (one address),
+    const GIB = 1024 * MIB;
+    const TABS = ["overview", "settings", "account"];
+    // kind: "int" (whole number), "mib"/"gib" (bytes shown in MiB/GiB), "ip" (one address),
     // "ips" (comma-separated addresses).
     const SETTING_GROUPS = [
       {
-        title: "Uploads",
+        id: "public",
+        title: "Public uploads (text and images)",
+        hint: "Limits for the anonymous uploads made from the home page. Assets are kept in memory.",
         fields: [
           { name: "min_asset_duration_minutes", label: "Min duration (minutes)", kind: "int" },
           { name: "max_asset_duration_minutes", label: "Max duration (minutes, up to 1440)", kind: "int" },
@@ -572,6 +600,18 @@
         ],
       },
       {
+        id: "files",
+        title: "Files (admin uploads)",
+        hint: "Limits for the files shared by the admin, stored on disk. File sharing is not available yet; " +
+          "these limits will apply to it.",
+        fields: [
+          { name: "max_file_size_bytes", label: "Max file size (GiB, up to 100)", kind: "gib" },
+          { name: "max_files_total_bytes", label: "Total disk space (GiB)", kind: "gib" },
+          { name: "max_file_duration_minutes", label: "Max duration (minutes, 10080 = 7 days)", kind: "int" },
+        ],
+      },
+      {
+        id: "logs",
         title: "Logs",
         fields: [
           { name: "max_log_file_bytes", label: "Rotate log at (MiB, at least 1)", kind: "mib" },
@@ -580,6 +620,7 @@
         ],
       },
       {
+        id: "network",
         title: "Network",
         hint: "If you change the address or port, update the container port mapping (-p) too, " +
           "or the server will be unreachable after the restart.",
@@ -590,22 +631,39 @@
         ],
       },
       {
-        title: "Admin",
+        id: "session",
+        title: "Admin session",
         fields: [
           { name: "admin_session_max_age_minutes", label: "Session lifetime (minutes)", kind: "int" },
         ],
       },
     ];
     const SETTING_FIELDS = SETTING_GROUPS.flatMap((group) => group.fields);
-    let loadedSettings = null;
+    // Server state: `current` is what is saved, `defaults` what a fresh install uses.
+    let settingsState = null;
 
-    function buildSettingsForm(restartFields) {
-      const groups = SETTING_GROUPS.map((group) => {
+    function selectTab(name, updateUrl = true) {
+      const tab = TABS.includes(name) ? name : "overview";
+      for (const id of TABS) {
+        document.getElementById(`tab-${id}`).hidden = id !== tab;
+        document.getElementById(`tabBtn-${id}`).setAttribute("aria-selected", String(id === tab));
+      }
+      if (updateUrl && location.hash !== `#${tab}`) {
+        history.replaceState(null, "", `#${tab}`);
+      }
+    }
+
+    function groupOf(fieldName) {
+      return SETTING_GROUPS.find((group) => group.fields.some((field) => field.name === fieldName));
+    }
+
+    function buildSettingsSections(restartFields) {
+      const sections = SETTING_GROUPS.map((group) => {
         const rows = group.fields.map((field) => {
           const input = el("input", { id: `setting-${field.name}`, name: field.name });
           if (field.kind === "int") {
             Object.assign(input, { type: "number", step: "1", min: "0" });
-          } else if (field.kind === "mib") {
+          } else if (field.kind === "mib" || field.kind === "gib") {
             Object.assign(input, { type: "number", step: "any", min: "0" });
           } else {
             Object.assign(input, { type: "text", spellcheck: false });
@@ -622,34 +680,58 @@
             el("span", { className: "field-error", id: `error-${field.name}` })
           );
         });
+
+        const restoreBtn = el("button", { className: "small-btn", type: "button" }, "Restore defaults");
+        restoreBtn.addEventListener("click", () => {
+          fillGroup(group, settingsState.defaults);
+          setMessage(`settingsMessage-${group.id}`, "Defaults filled in. Press Save to apply them.", "ok");
+        });
+        const discardBtn = el("button", { className: "small-btn", type: "button" }, "Discard changes");
+        discardBtn.addEventListener("click", () => {
+          fillGroup(group, settingsState.current);
+          setMessage(`settingsMessage-${group.id}`, "");
+        });
+        const form = el(
+          "form",
+          { noValidate: true },
+          el("div", { className: "settings-grid" }, ...rows),
+          el("p", { className: "message", id: `settingsMessage-${group.id}` }),
+          el(
+            "div",
+            { className: "settings-actions" },
+            restoreBtn,
+            discardBtn,
+            el("button", { className: "small-btn", type: "submit" }, "Save")
+          )
+        );
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          saveGroup(group);
+        });
+
         return el(
           "div",
-          { className: "settings-group" },
-          el("h3", {}, group.title),
+          { className: "panel", id: `settings-${group.id}` },
+          el("h2", {}, group.title),
           ...(group.hint ? [el("p", { className: "hint" }, group.hint)] : []),
-          el("div", { className: "settings-grid" }, ...rows)
+          form
         );
       });
-      document.getElementById("settingsFields").replaceChildren(...groups);
+      document.getElementById("settingsSections").replaceChildren(...sections);
     }
 
-    function fillSettingsForm(settings) {
-      for (const field of SETTING_FIELDS) {
-        const value = settings[field.name];
+    function fillGroup(group, values) {
+      for (const field of group.fields) {
+        const value = values[field.name];
         const input = document.getElementById(`setting-${field.name}`);
-        if (field.kind === "mib") {
-          input.value = String(parseFloat((value / MIB).toFixed(6)));
+        if (field.kind === "mib" || field.kind === "gib") {
+          const unit = field.kind === "mib" ? MIB : GIB;
+          input.value = String(parseFloat((value / unit).toFixed(6)));
         } else if (field.kind === "ips") {
           input.value = value.join(", ");
         } else {
           input.value = String(value);
         }
-      }
-      clearFieldErrors();
-    }
-
-    function clearFieldErrors() {
-      for (const field of SETTING_FIELDS) {
         document.getElementById(`error-${field.name}`).textContent = "";
       }
     }
@@ -659,35 +741,42 @@
       if (target) target.textContent = message;
     }
 
-    // Reads the form into the JSON the server expects. Type errors are caught here;
+    // Reads one section into the JSON the server expects. Type errors are caught here;
     // ranges are checked by the server, which is the only place that enforces them.
-    function readSettingsForm() {
-      const settings = {};
+    function readGroup(group) {
+      const values = {};
       let ok = true;
-      for (const field of SETTING_FIELDS) {
+      for (const field of group.fields) {
+        document.getElementById(`error-${field.name}`).textContent = "";
         const raw = document.getElementById(`setting-${field.name}`).value.trim();
-        if (field.kind === "int" || field.kind === "mib") {
+        if (field.kind === "int" || field.kind === "mib" || field.kind === "gib") {
           const number = raw === "" ? NaN : Number(raw);
-          const value = field.kind === "mib" ? Math.round(number * MIB) : number;
+          const unit = { int: 1, mib: MIB, gib: GIB }[field.kind];
+          const value = field.kind === "int" ? number : Math.round(number * unit);
           if (!Number.isSafeInteger(value) || value < 0) {
-            showFieldError(field.name, field.kind === "mib" ? "must be a positive number" : "must be a whole number");
+            showFieldError(field.name, field.kind === "int" ? "must be a whole number" : "must be a positive number");
             ok = false;
             continue;
           }
-          settings[field.name] = value;
+          values[field.name] = value;
         } else if (field.kind === "ips") {
-          settings[field.name] = raw === "" ? [] : raw.split(",").map((ip) => ip.trim()).filter(Boolean);
+          values[field.name] = raw === "" ? [] : raw.split(",").map((ip) => ip.trim()).filter(Boolean);
         } else {
-          settings[field.name] = raw;
+          values[field.name] = raw;
         }
       }
-      return ok ? settings : null;
+      return ok ? values : null;
     }
 
+    // Shows, in each section, the restart-only fields whose saved value is not in use yet.
     function showRestartPending(data) {
-      if (data.restart_pending.length === 0) return;
-      const details = data.restart_pending.map((name) => `${name} (running: ${data.running[name]})`);
-      setMessage("settingsMessage", `Restart the server to apply: ${details.join(", ")}.`, "ok");
+      for (const group of SETTING_GROUPS) {
+        const pending = data.restart_pending.filter((name) => groupOf(name) === group);
+        if (pending.length > 0) {
+          const details = pending.map((name) => `${name} (running: ${data.running[name]})`);
+          setMessage(`settingsMessage-${group.id}`, `Restart the server to apply: ${details.join(", ")}.`, "ok");
+        }
+      }
     }
 
     async function loadSettings() {
@@ -700,11 +789,40 @@
         setMessage("settingsMessage", errorText(result, "Failed to load settings"));
         return;
       }
-      if (!loadedSettings) buildSettingsForm(result.data.restart_fields);
-      loadedSettings = result.data.current;
-      fillSettingsForm(loadedSettings);
+      if (!settingsState) buildSettingsSections(result.data.restart_fields);
+      settingsState = result.data;
+      for (const group of SETTING_GROUPS) {
+        fillGroup(group, settingsState.current);
+        setMessage(`settingsMessage-${group.id}`, "");
+      }
       setMessage("settingsMessage", "");
-      showRestartPending(result.data);
+      showRestartPending(settingsState);
+    }
+
+    // Saves one section. The other fields are sent with their saved values, so unsaved
+    // edits in other sections are neither saved nor lost.
+    async function saveGroup(group) {
+      const messageId = `settingsMessage-${group.id}`;
+      const values = readGroup(group);
+      if (!values) {
+        setMessage(messageId, "Fix the marked fields.");
+        return;
+      }
+      const result = await api("/settings", { method: "PUT", body: { ...settingsState.current, ...values } });
+      if (result.response.ok) {
+        settingsState = result.data;
+        fillGroup(group, settingsState.current);
+        setMessage(messageId, "Saved.", "ok");
+        showRestartPending(settingsState);
+        await loadDashboard();
+      } else if (result.response.status === 401) {
+        show("loginView");
+      } else {
+        for (const error of (result.data && result.data.fields) || []) {
+          showFieldError(error.field, error.message);
+        }
+        setMessage(messageId, errorText(result, "Saving settings failed"));
+      }
     }
 
     async function deleteAsset(id) {
@@ -773,35 +891,10 @@
       }
     });
 
-    document.getElementById("settingsForm").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      clearFieldErrors();
-      const settings = readSettingsForm();
-      if (!settings) {
-        setMessage("settingsMessage", "Fix the marked fields.");
-        return;
-      }
-      const result = await api("/settings", { method: "PUT", body: settings });
-      if (result.response.ok) {
-        loadedSettings = result.data.current;
-        fillSettingsForm(loadedSettings);
-        setMessage("settingsMessage", "Settings saved.", "ok");
-        showRestartPending(result.data);
-        await loadDashboard();
-      } else if (result.response.status === 401) {
-        show("loginView");
-      } else {
-        for (const error of (result.data && result.data.fields) || []) {
-          showFieldError(error.field, error.message);
-        }
-        setMessage("settingsMessage", errorText(result, "Saving settings failed"));
-      }
-    });
-
-    document.getElementById("settingsReset").addEventListener("click", () => {
-      if (loadedSettings) fillSettingsForm(loadedSettings);
-      setMessage("settingsMessage", "");
-    });
+    for (const button of document.querySelectorAll(".tab")) {
+      button.addEventListener("click", () => selectTab(button.dataset.tab));
+    }
+    window.addEventListener("hashchange", () => selectTab(location.hash.slice(1), false));
 
     document.getElementById("refreshBtn").addEventListener("click", loadDashboard);
 

@@ -419,8 +419,9 @@ fn invalid_settings_response(errors: Vec<FieldError>) -> HttpResponse {
     HttpResponse::BadRequest().json(json!({ "error": "Invalid settings", "fields": errors }))
 }
 
-/// `current` is what the file holds, `running` what the server started with. Restart-only
-/// fields that differ between the two are listed in `restart_pending`.
+/// `current` is what the file holds, `running` what the server started with, `defaults` what
+/// a fresh install uses. Restart-only fields that differ between `current` and `running` are
+/// listed in `restart_pending`.
 fn settings_response(app_state: &AppState) -> Value {
     let current = app_state.settings.get();
     let running = app_state.settings.running();
@@ -434,6 +435,7 @@ fn settings_response(app_state: &AppState) -> Value {
     json!({
         "current": current_value,
         "running": running_value,
+        "defaults": settings_value(&Settings::default()),
         "restart_fields": RESTART_FIELDS,
         "restart_pending": restart_pending,
     })

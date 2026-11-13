@@ -138,6 +138,9 @@ Settings live in `data/admin/settings.json` and are edited in the **Settings** s
 | `max_asset_size_bytes` | `3145728` (3 MiB) | 1 to 104857600 (100 MiB) | immediately |
 | `max_total_storage_bytes` | `536870912` (512 MiB) | not below `max_asset_size_bytes` | immediately |
 | `max_uploads_per_ip` | `10` | 1 to 10000 | immediately |
+| `max_file_size_bytes` | `1073741824` (1 GiB) | 1 to 107374182400 (100 GiB) | reserved for file sharing |
+| `max_files_total_bytes` | `10737418240` (10 GiB) | not below `max_file_size_bytes` | reserved for file sharing |
+| `max_file_duration_minutes` | `10080` (7 days) | 1 to 525600 (365 days) | reserved for file sharing |
 | `max_log_file_bytes` | `52428800` (50 MiB) | at least 1048576 (1 MiB) | next write |
 | `max_rotated_logs` | `10` | 0 to 1000 | next rotation |
 | `max_recent_activity` | `20` | 1 to 1000 | immediately |
@@ -314,7 +317,8 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 - Usage cards: active assets, storage, totals since startup
 - Active uploads grouped by uploader IP
 - Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
-- Settings: every value in [Configuration](#configuration), with per-field errors and a notice when a restart is needed
+- Tabs: **Overview** (usage, uploads by IP, active assets), **Settings**, **Account** (password); the tab is kept in the URL (`/admin#settings`)
+- Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
 - Password change
 
 ### Admin API
@@ -331,7 +335,7 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `GET` | `/assets` | yes | Active assets |
 | `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
 | `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
-| `GET` | `/settings` | yes | `current` (saved) and `running` (in use since startup) settings, `restart_fields`, and `restart_pending` |
+| `GET` | `/settings` | yes | `current` (saved), `running` (in use since startup), and `defaults` settings, `restart_fields`, and `restart_pending` |
 | `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
 
 Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.

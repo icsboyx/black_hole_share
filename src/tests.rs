@@ -588,6 +588,23 @@ async fn bad_settings_file_stops_startup() {
 }
 
 #[actix_web::test]
+async fn file_limits_are_validated() {
+    let gib = 1024 * 1024 * 1024;
+    assert_eq!(defaults().max_file_size_bytes, gib);
+    assert_eq!(defaults().max_files_total_bytes, 10 * gib);
+    assert_eq!(defaults().max_file_duration_minutes, 7 * 24 * 60);
+
+    let settings = Settings {
+        max_file_size_bytes: 2 * gib,
+        max_files_total_bytes: gib,
+        max_file_duration_minutes: 0,
+        ..defaults()
+    };
+    let fields: Vec<String> = settings.validate().into_iter().map(|e| e.field).collect();
+    assert_eq!(fields, ["max_files_total_bytes", "max_file_duration_minutes"]);
+}
+
+#[actix_web::test]
 async fn validation_reports_every_broken_field() {
     let settings = Settings {
         min_asset_duration_minutes: 10,
@@ -646,6 +663,7 @@ async fn restart_only_settings_are_reported_as_pending() {
     assert_eq!(response["current"]["bind_port"], 9090);
     assert_eq!(response["running"]["bind_port"], 8080);
     assert_eq!(response["restart_pending"], json!(["bind_port"]));
+    assert_eq!(response["defaults"], json!(defaults()));
 
     let fetched: Value =
         test::call_and_read_body_json(&app, admin_get("/api/admin/settings", &cookie).to_request())

@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admin bar on every page, shown only to the logged-in admin, with links and logout.
 - Settings stored in `data/admin/settings.json` and edited from the admin panel: upload limits, log limits, trusted proxies, session lifetime, bind address and port. Limits apply immediately; bind address, port, and session lifetime after a restart. Every change is logged.
 - `GET /api/limits` returns the upload limits; the upload page builds its duration slider from them.
+- Admin panel tabs (Overview, Settings, Account); settings are split into sections per type, each saved on its own, with "Restore defaults".
+- File sharing limits in the settings (max file size, total disk space, max duration), used by the upcoming file sharing.
 
 ### Changed
 

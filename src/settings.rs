@@ -17,6 +17,7 @@ use tokio::{fs, sync::Mutex};
 use crate::auth::write_private_file;
 
 const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * MIB;
 
 pub const MAX_ASSET_DURATION_LIMIT_MINUTES: u32 = 24 * 60;
 pub const MAX_ASSETS_LIMIT: usize = 100_000;
@@ -26,6 +27,8 @@ pub const MIN_LOG_FILE_BYTES: u64 = MIB;
 pub const MAX_ROTATED_LOGS_LIMIT: usize = 1000;
 pub const MAX_RECENT_ACTIVITY_LIMIT: usize = 1000;
 pub const MAX_TRUSTED_PROXIES: usize = 64;
+pub const MAX_FILE_SIZE_LIMIT_BYTES: u64 = 100 * GIB;
+pub const MAX_FILE_DURATION_LIMIT_MINUTES: u32 = 365 * 24 * 60;
 pub const MIN_SESSION_MAX_AGE_MINUTES: u32 = 5;
 pub const MAX_SESSION_MAX_AGE_MINUTES: u32 = 7 * 24 * 60;
 
@@ -40,6 +43,11 @@ pub struct Settings {
     pub max_asset_size_bytes: usize,
     pub max_total_storage_bytes: usize,
     pub max_uploads_per_ip: usize,
+    /// Largest file the admin can share.
+    pub max_file_size_bytes: u64,
+    /// Disk space for all shared files together.
+    pub max_files_total_bytes: u64,
+    pub max_file_duration_minutes: u32,
     pub max_log_file_bytes: u64,
     pub max_rotated_logs: usize,
     pub max_recent_activity: usize,
@@ -62,6 +70,9 @@ impl Default for Settings {
             max_asset_size_bytes: 3 * MIB as usize,
             max_total_storage_bytes: 512 * MIB as usize,
             max_uploads_per_ip: 10,
+            max_file_size_bytes: GIB,
+            max_files_total_bytes: 10 * GIB,
+            max_file_duration_minutes: 7 * 24 * 60,
             max_log_file_bytes: 50 * MIB,
             max_rotated_logs: 10,
             max_recent_activity: 20,
@@ -126,6 +137,21 @@ impl Settings {
             (1..=MAX_UPLOADS_PER_IP_LIMIT).contains(&self.max_uploads_per_ip),
             "max_uploads_per_ip",
             format!("must be between 1 and {MAX_UPLOADS_PER_IP_LIMIT}"),
+        );
+        check(
+            (1..=MAX_FILE_SIZE_LIMIT_BYTES).contains(&self.max_file_size_bytes),
+            "max_file_size_bytes",
+            format!("must be between 1 and {MAX_FILE_SIZE_LIMIT_BYTES} bytes"),
+        );
+        check(
+            self.max_files_total_bytes >= self.max_file_size_bytes,
+            "max_files_total_bytes",
+            "must not be lower than the maximum file size".into(),
+        );
+        check(
+            (1..=MAX_FILE_DURATION_LIMIT_MINUTES).contains(&self.max_file_duration_minutes),
+            "max_file_duration_minutes",
+            format!("must be between 1 and {MAX_FILE_DURATION_LIMIT_MINUTES}"),
         );
         check(
             self.max_log_file_bytes >= MIN_LOG_FILE_BYTES,
