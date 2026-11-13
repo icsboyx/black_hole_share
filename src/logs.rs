@@ -188,6 +188,9 @@ impl LogFile {
             writer.size = 0;
         }
         writer.file.write_all(line.as_bytes()).await?;
+        // A tokio file finishes writes in the background: flushing waits until the line is
+        // in the file, so it is there for readers and before a restart replaces the process.
+        writer.file.flush().await?;
         writer.size += line.len() as u64;
         // The same line on stdout, so `docker logs` / `podman logs` show every event.
         print!("{line}");

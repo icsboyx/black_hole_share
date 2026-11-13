@@ -4,7 +4,7 @@
 
 ## Settings
 
-Settings live in `data/admin/settings.json` and are edited in the **Settings** section of the admin panel. The file is created with the defaults on first start. A file that cannot be parsed, has an unknown field, or holds a value outside the allowed range stops startup and names the problem; a missing field takes its default.
+Settings live in `data/admin/settings.json` and are edited in the **Settings** section of the admin panel. The file is created with the defaults on first start. Some settings can instead be fixed by [environment variables](#environment-variables). A file that cannot be parsed, has an unknown field, or holds a value outside the allowed range stops startup and names the problem; a missing field takes its default.
 
 | Setting | Default | Allowed | Applies |
 | --- | --- | --- | --- |
@@ -35,13 +35,36 @@ Settings live in `data/admin/settings.json` and are edited in the **Settings** s
 
 When the server runs in a container, changing `bind_addr`, `bind_port`, or `https_port` also needs a matching port mapping (for example `-p 8443:8443`), or the server is unreachable after the restart.
 
-One environment variable is still read:
+## Environment variables
 
-| Environment Variable | Default | Description |
+The usual way to configure a container. Each variable below, when set and not empty, fixes its setting: it is applied at every start and saved to `settings.json`, and the admin panel shows the field as read-only with the variable's name. To change the value, change the variable and recreate the container. Unset the variable to edit the field in the panel again; it keeps the last value until then.
+
+| Variable | Setting | Example |
+| --- | --- | --- |
+| `BIND_ADDR` | `bind_addr` | `0.0.0.0` |
+| `BIND_PORT_HTTP` | `bind_port` | `80` |
+| `BIND_PORT_HTTPS` | `https_port` | `443` (used only when HTTPS is enabled in the panel) |
+| `TRUSTED_PROXIES` | `trusted_proxies` | `192.168.250.100` or `10.0.0.2, 10.0.0.3` |
+| `EXTERNAL_FQDN` | `public_url` | `share.example.com` becomes `https://share.example.com`; a port is allowed (`share.example.com:8443`), a scheme or a path is not |
+
+A value that cannot be parsed, or that fails the setting's own checks, stops startup with a message naming the variable. The startup log lists every setting fixed this way.
+
+```yaml
+    environment:
+      - BIND_ADDR=0.0.0.0
+      - BIND_PORT_HTTP=80
+      - BIND_PORT_HTTPS=443
+      - TRUSTED_PROXIES=192.168.250.100
+      - EXTERNAL_FQDN=share.example.com
+```
+
+One more variable is not a setting:
+
+| Variable | Default | Description |
 | --- | --- | --- |
 | `ADMIN_COOKIE_SECURE` | unset | Forces the admin cookie's `Secure` flag (`true` or `false`); any other value stops startup. Unset, the flag follows the HTTPS setup (see [HTTPS](#https)). Keep it for emergencies |
 
-`BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; the server prints a warning if they are set.
+`BIND_PORT` from 1.x is not read: the server prints a warning to use `BIND_PORT_HTTP` instead.
 
 ## Limits
 
@@ -111,7 +134,7 @@ bhs.example.com {
 
 ## Upgrading from 1.x
 
-- `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read: after the first start, set them in **Settings** in the admin panel. The server warns while they are still set.
+- `BIND_ADDR` and `TRUSTED_PROXIES` work as before. `BIND_PORT` is renamed `BIND_PORT_HTTP`; the server warns while the old name is set. See [Environment variables](#environment-variables), also for the new `BIND_PORT_HTTPS` and `EXTERNAL_FQDN`.
 - Open `/admin` right after the first start and create the admin account: until then, whoever opens `/admin` first becomes the admin.
 - Behind a TLS proxy, set **Public URL** to the `https://` address and add the proxy to **Trusted proxies**, then restart: the admin cookie becomes `Secure`.
 - `data/` gains `admin/` and `storage/`; mount the whole directory and back it up.

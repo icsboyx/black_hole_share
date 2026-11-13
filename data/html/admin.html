@@ -390,7 +390,7 @@
       return SETTING_GROUPS.find((group) => group.fields.some((field) => field.name === fieldName));
     }
 
-    function buildSettingsSections(restartFields) {
+    function buildSettingsSections(restartFields, locked) {
       const sections = SETTING_GROUPS.map((group) => {
         const fields = group.fields.map((field) => {
           const input = field.kind === "select"
@@ -415,12 +415,18 @@
           if (restartFields.includes(field.name)) {
             label.append(el("span", { className: "restart-tag", title: "Applies after a server restart" }, "restart"));
           }
+          // Set by an environment variable at every start: shown, not editable here.
+          const envVar = locked[field.name];
+          if (envVar) {
+            input.disabled = true;
+            label.append(el("span", { className: "restart-tag", title: `Set by ${envVar} in the container environment` }, "env"));
+          }
           return el(
             "div",
             { className: field.wide ? "field wide" : "field", id: `field-${field.name}` },
             label,
             el("div", { className: "input-wrap" }, input, ...(field.unit ? [el("span", { className: "unit" }, field.unit)] : [])),
-            el("div", { className: "field-help" }, field.help || ""),
+            el("div", { className: "field-help" }, envVar ? `Set by ${envVar}; change it in the container environment` : field.help || ""),
             el("div", { className: "field-error", id: `error-${field.name}` })
           );
         });
@@ -479,7 +485,9 @@
     // edits are compared against them to show "Unsaved changes".
     function fillGroup(group, values, clean = true) {
       for (const field of group.fields) {
-        document.getElementById(`setting-${field.name}`).value = displayValue(field, values[field.name]);
+        // Fields set by environment variables always show the value in effect.
+        const source = settingsState && settingsState.locked[field.name] ? settingsState.current : values;
+        document.getElementById(`setting-${field.name}`).value = displayValue(field, source[field.name]);
         setFieldError(field.name, "");
       }
       if (clean) {
@@ -556,7 +564,7 @@
         setMessage("settingsMessage", errorText(result, "Failed to load settings"));
         return;
       }
-      if (!settingsState) buildSettingsSections(result.data.restart_fields);
+      if (!settingsState) buildSettingsSections(result.data.restart_fields, result.data.locked || {});
       settingsState = result.data;
       for (const group of SETTING_GROUPS) {
         fillGroup(group, settingsState.current);

@@ -3,8 +3,13 @@
 //! Most values apply to the next request. The listening addresses, the TLS setup and
 //! `admin_session_max_age_minutes` are read once at startup, so a change takes effect only
 //! after a restart; `running()` keeps the values the server started with.
+//!
+//! A few settings can be fixed by environment variables ([`ENV_SETTINGS`]), the usual way to
+//! configure a container: they are applied and saved at every start, and the admin panel
+//! cannot change them.
 
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -36,6 +41,18 @@ pub const MAX_LOCKOUT_MINUTES: u32 = 24 * 60;
 pub const MAX_REQUEST_UPLOADS_PER_HOUR_LIMIT: u32 = 10_000;
 pub const MAX_PUBLIC_URL_CHARS: usize = 300;
 pub const MAX_TLS_PATH_CHARS: usize = 1000;
+
+/// Environment variables that set a setting at every start, and the field each one sets.
+pub const ENV_SETTINGS: &[(&str, &str)] = &[
+    ("BIND_ADDR", "bind_addr"),
+    ("BIND_PORT_HTTP", "bind_port"),
+    ("BIND_PORT_HTTPS", "https_port"),
+    ("TRUSTED_PROXIES", "trusted_proxies"),
+    ("EXTERNAL_FQDN", "public_url"),
+];
+
+/// Settings fixed by environment variables: field name to variable name.
+pub type LockedFields = BTreeMap<&'static str, &'static str>;
 
 /// How the server itself serves HTTPS. Behind a reverse proxy that does TLS (Caddy,
 /// nginx...) it stays `Off`.
@@ -303,40 +320,65 @@ pub struct SettingsStore {
     running: Arc<Settings>,
     /// Serializes updates so the file and the in-memory copy never disagree.
     write: Arc<Mutex<()>>,
+    /// Fields set by environment variables, which `update` refuses to change.
+    locked: Arc<LockedFields>,
 }
 
 impl SettingsStore {
-    /// Loads the settings file, creating it with the defaults on first start. A file that
-    /// cannot be parsed or holds invalid values stops startup instead of being replaced.
+    /// Loads the settings file, creating it with the defaults on first start, then applies
+    /// the environment variables in [`ENV_SETTINGS`]. A file or a variable that cannot be
+    /// parsed, or invalid values, stop startup instead of being replaced.
     pub async fn load(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::load_with_env(path, |name| std::env::var(name).ok()).await
+    }
+
+    /// `load` with the environment read through `env`, so tests do not touch the process.
+    pub async fn load_with_env(
+        path: impl Into<PathBuf>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let path = path.into();
-        let settings = match fs::read(&path).await {
-            Ok(bytes) => {
-                let settings: Settings = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("invalid settings file {}", path.display()))?;
-                let errors = settings.validate();
-                if !errors.is_empty() {
-                    let details: Vec<String> = errors
-                        .iter()
-                        .map(|e| format!("{} {}", e.field, e.message))
-                        .collect();
-                    bail!(
-                        "invalid settings in {}: {}",
-                        path.display(),
-                        details.join("; ")
-                    );
-                }
-                settings
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let settings = Settings::default();
-                persist(&path, &settings).await?;
-                println!("Settings file created with defaults at {}", path.display());
-                settings
-            }
+        let (saved, created) = match fs::read(&path).await {
+            Ok(bytes) => (
+                Some(
+                    serde_json::from_slice::<Settings>(&bytes)
+                        .with_context(|| format!("invalid settings file {}", path.display()))?,
+                ),
+                false,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, true),
             Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
         };
-        Ok(Self::with_settings(path, settings))
+        let mut settings = saved.clone().unwrap_or_default();
+        let locked = apply_env(&mut settings, env)?;
+
+        let errors = settings.validate();
+        if !errors.is_empty() {
+            let details: Vec<String> = errors
+                .iter()
+                .map(|e| match locked.get(e.field.as_str()) {
+                    Some(var) => format!("{} (from {var}) {}", e.field, e.message),
+                    None => format!("{} {}", e.field, e.message),
+                })
+                .collect();
+            bail!(
+                "invalid settings in {}: {}",
+                path.display(),
+                details.join("; ")
+            );
+        }
+        if saved.as_ref() != Some(&settings) {
+            persist(&path, &settings).await?;
+            if created {
+                println!("Settings file created at {}", path.display());
+            }
+        }
+        for (field, var) in &locked {
+            println!("Setting {field} is fixed by {var}");
+        }
+        let mut store = Self::with_settings(path, settings);
+        store.locked = Arc::new(locked);
+        Ok(store)
     }
 
     fn with_settings(path: PathBuf, settings: Settings) -> Self {
@@ -345,6 +387,7 @@ impl SettingsStore {
             running: Arc::new(settings.clone()),
             current: Arc::new(RwLock::new(settings)),
             write: Arc::new(Mutex::new(())),
+            locked: Arc::default(),
         }
     }
 
@@ -364,6 +407,11 @@ impl SettingsStore {
             .clone()
     }
 
+    /// Fields fixed by environment variables, with the variable that sets each one.
+    pub fn locked(&self) -> &LockedFields {
+        &self.locked
+    }
+
     /// The settings the server started with, used for the restart-only values.
     pub fn running(&self) -> &Settings {
         &self.running
@@ -371,7 +419,20 @@ impl SettingsStore {
 
     /// Validates, saves and applies new settings. Returns the previous ones.
     pub async fn update(&self, new: Settings) -> Result<Settings, UpdateError> {
-        let errors = new.validate();
+        let mut errors = new.validate();
+        if !self.locked.is_empty() {
+            let current =
+                serde_json::to_value(self.get()).map_err(|e| UpdateError::Internal(e.into()))?;
+            let wanted = serde_json::to_value(&new).map_err(|e| UpdateError::Internal(e.into()))?;
+            for (field, var) in self.locked.iter() {
+                if current.get(field) != wanted.get(field) {
+                    errors.push(FieldError {
+                        field: (*field).to_string(),
+                        message: format!("is set by the {var} environment variable"),
+                    });
+                }
+            }
+        }
         if !errors.is_empty() {
             return Err(UpdateError::Invalid(errors));
         }
@@ -385,6 +446,55 @@ impl SettingsStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         Ok(std::mem::replace(&mut *current, new))
     }
+}
+
+/// Applies the environment variables in [`ENV_SETTINGS`] that are set and not empty.
+/// Returns the fields they fixed; a value that cannot be parsed is an error naming the
+/// variable. Ranges are checked afterwards by `validate`.
+pub fn apply_env(
+    settings: &mut Settings,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<LockedFields> {
+    let mut locked = LockedFields::new();
+    for &(var, field) in ENV_SETTINGS {
+        let Some(raw) = env(var) else { continue };
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let invalid = |what: &str| anyhow::anyhow!("{var}={value:?} is not {what}");
+        match field {
+            "bind_addr" => {
+                settings.bind_addr = value.parse().map_err(|_| invalid("an IP address"))?
+            }
+            "bind_port" => settings.bind_port = value.parse().map_err(|_| invalid("a port"))?,
+            "https_port" => settings.https_port = value.parse().map_err(|_| invalid("a port"))?,
+            "trusted_proxies" => {
+                settings.trusted_proxies = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|ip| !ip.is_empty())
+                    .map(|ip| ip.parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| invalid("a comma-separated list of IP addresses"))?;
+            }
+            "public_url" => {
+                // A host name, optionally with a port: the scheme is always https, the
+                // address of a TLS proxy or of this server's own HTTPS.
+                if value.contains("://") || value.contains('/') {
+                    return Err(invalid("a host name without scheme or path"));
+                }
+                let url = format!("https://{value}");
+                if public_url_host(&url).is_none() {
+                    return Err(invalid("a valid host name"));
+                }
+                settings.public_url = url;
+            }
+            _ => unreachable!("ENV_SETTINGS names a field apply_env does not handle"),
+        }
+        locked.insert(field, var);
+    }
+    Ok(locked)
 }
 
 /// The host of a valid public URL: `http` or `https`, a host name or IP, an optional port,

@@ -25,7 +25,7 @@ use crate::{
     requests::RequestStore,
     logs::{LogEventType, LogFile, LogLimits},
     resolve_client_ip, security_headers,
-    settings::{Settings, SettingsStore},
+    settings::{Settings, SettingsStore, UpdateError},
 };
 
 fn defaults() -> Settings {
@@ -576,7 +576,7 @@ fn settings_with(changes: Value) -> Value {
 #[actix_web::test]
 async fn settings_file_is_created_with_defaults_and_reloaded() {
     let path = temp_dir().join("admin/settings.json");
-    let store = SettingsStore::load(path.clone()).await.unwrap();
+    let store = load_settings(path.clone()).await.unwrap();
     assert_eq!(store.get(), defaults());
     #[cfg(unix)]
     {
@@ -592,14 +592,98 @@ async fn settings_file_is_created_with_defaults_and_reloaded() {
         ..defaults()
     };
     store.update(changed.clone()).await.unwrap();
-    assert_eq!(SettingsStore::load(path).await.unwrap().get(), changed);
+    assert_eq!(load_settings(path).await.unwrap().get(), changed);
+}
+
+/// Loads settings without reading the process environment, so the tests do not depend on
+/// the variables of the shell that runs them.
+async fn load_settings(path: impl Into<std::path::PathBuf>) -> anyhow::Result<SettingsStore> {
+    SettingsStore::load_with_env(path, |_| None).await
+}
+
+fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+    move |name| {
+        vars.iter()
+            .find(|(var, _)| *var == name)
+            .map(|(_, value)| value.to_string())
+    }
+}
+
+#[actix_web::test]
+async fn environment_variables_set_and_lock_settings() {
+    let path = temp_dir().join("settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, br#"{ "max_assets": 5, "bind_port": 9000 }"#).unwrap();
+    let env = env_of(&[
+        ("BIND_ADDR", "127.0.0.1"),
+        ("BIND_PORT_HTTP", "80"),
+        ("BIND_PORT_HTTPS", "443"),
+        ("TRUSTED_PROXIES", "192.168.250.100, 10.0.0.1"),
+        ("EXTERNAL_FQDN", "share.example.com"),
+    ]);
+    let store = SettingsStore::load_with_env(path.clone(), env).await.unwrap();
+    let expected = Settings {
+        max_assets: 5,
+        bind_addr: "127.0.0.1".parse().unwrap(),
+        bind_port: 80,
+        https_port: 443,
+        trusted_proxies: vec!["192.168.250.100".parse().unwrap(), "10.0.0.1".parse().unwrap()],
+        public_url: "https://share.example.com".into(),
+        ..defaults()
+    };
+    assert_eq!(store.get(), expected);
+    assert_eq!(store.running(), &expected);
+    assert_eq!(store.locked().get("bind_port"), Some(&"BIND_PORT_HTTP"));
+    assert_eq!(store.locked().len(), 5);
+    // Saved to the file, so the values are also there without the variables.
+    assert_eq!(load_settings(path).await.unwrap().get(), expected);
+
+    // The panel cannot change a locked field, but can change the others.
+    let moved = Settings { bind_port: 8080, ..expected.clone() };
+    match store.update(moved).await {
+        Err(UpdateError::Invalid(errors)) => {
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].field, "bind_port");
+            assert!(errors[0].message.contains("BIND_PORT_HTTP"), "{}", errors[0].message);
+        }
+        other => panic!("expected a locked-field error, got {other:?}"),
+    }
+    let other = Settings { max_assets: 6, ..expected.clone() };
+    store.update(other.clone()).await.unwrap();
+    assert_eq!(store.get(), other);
+}
+
+#[actix_web::test]
+async fn bad_or_empty_environment_variables() {
+    let dir = temp_dir();
+    for (name, vars) in [
+        ("addr", &[("BIND_ADDR", "not an ip")][..]),
+        ("port", &[("BIND_PORT_HTTP", "70000")][..]),
+        ("proxies", &[("TRUSTED_PROXIES", "10.0.0.1, nope")][..]),
+        ("fqdn with scheme", &[("EXTERNAL_FQDN", "https://share.example.com")][..]),
+        ("fqdn with path", &[("EXTERNAL_FQDN", "share.example.com/x")][..]),
+        ("https port zero", &[("BIND_PORT_HTTPS", "0")][..]),
+    ] {
+        let path = dir.join(format!("{}.json", name.replace(' ', "_")));
+        let vars: &'static [(&'static str, &'static str)] = vars;
+        let error = SettingsStore::load_with_env(path.clone(), env_of(vars)).await;
+        let message = format!("{:#}", error.err().unwrap_or_else(|| panic!("{name} loaded")));
+        assert!(message.contains(vars[0].0), "{name}: {message}");
+        assert!(!path.exists(), "{name}: nothing is saved when startup fails");
+    }
+
+    // An empty variable counts as not set.
+    let path = dir.join("empty.json");
+    let store = SettingsStore::load_with_env(path, env_of(&[("BIND_PORT_HTTP", " ")])).await.unwrap();
+    assert!(store.locked().is_empty());
+    assert_eq!(store.get().bind_port, defaults().bind_port);
 }
 
 #[actix_web::test]
 async fn settings_file_missing_fields_take_defaults() {
     let path = temp_dir().join("settings.json");
     fs::write(&path, br#"{ "max_assets": 5 }"#).unwrap();
-    let settings = SettingsStore::load(path).await.unwrap().get();
+    let settings = load_settings(path).await.unwrap().get();
     assert_eq!(
         settings,
         Settings {
@@ -621,7 +705,7 @@ async fn bad_settings_file_stops_startup() {
         let path = dir.join(format!("{}.json", name.replace(' ', "_")));
         fs::write(&path, contents).unwrap();
         let before = fs::read(&path).unwrap();
-        assert!(SettingsStore::load(path.clone()).await.is_err(), "{name}");
+        assert!(load_settings(path.clone()).await.is_err(), "{name}");
         // The broken file is left for the admin to fix, never replaced by defaults.
         assert_eq!(fs::read(&path).unwrap(), before, "{name}");
     }

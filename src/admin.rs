@@ -1045,6 +1045,7 @@ fn settings_response(app_state: &AppState) -> Value {
         "defaults": settings_value(&Settings::default()),
         "restart_fields": RESTART_FIELDS,
         "restart_pending": restart_pending,
+        "locked": app_state.settings.locked(),
         "tls": *app_state.tls_status,
     })
 }

@@ -52,7 +52,20 @@ cargo run --release
 
 **Back up `data/`**: it holds the admin credentials and the key that decrypts received files. Without `data/admin/credentials.json`, those files cannot be read again.
 
-Upgrading from 1.x: `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; see [Upgrading from 1.x](docs/configuration.md#upgrading-from-1x).
+### Environment variables
+
+Address, ports, trusted proxies, and the public host name can also be fixed from the container environment; the panel then shows them as read-only:
+
+```yaml
+    environment:
+      - BIND_ADDR=0.0.0.0
+      - BIND_PORT_HTTP=8080
+      - BIND_PORT_HTTPS=8443
+      - TRUSTED_PROXIES=192.168.250.100
+      - EXTERNAL_FQDN=share.example.com
+```
+
+See [Environment variables](docs/configuration.md#environment-variables). Upgrading from 1.x: `BIND_PORT` is now `BIND_PORT_HTTP`; see [Upgrading from 1.x](docs/configuration.md#upgrading-from-1x).
 
 ## Documentation
 

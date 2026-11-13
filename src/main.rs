@@ -45,8 +45,8 @@ pub static REQUESTS_FILE: &str = "data/storage/requests.json";
 pub static LOG_FILE_NAME: &str = "log.txt";
 // Set on the process started by a restart from the admin panel.
 const RESTARTED_ENV: &str = "BHS_RESTARTED";
-// Limits and bind address now live in SETTINGS_FILE; these variables are no longer read.
-static IGNORED_ENV_VARS: &[&str] = &["BIND_ADDR", "BIND_PORT", "TRUSTED_PROXIES"];
+// Variables of 1.x that are no longer read, and what replaces each one.
+static RENAMED_ENV_VARS: &[(&str, &str)] = &[("BIND_PORT", "BIND_PORT_HTTP")];
 
 // SVG and HTML are excluded on purpose: both can run scripts when opened directly.
 pub static ALLOWED_CONTENT_TYPES: &[&str] = &[
@@ -509,9 +509,9 @@ fn admin_cookie_secure_override() -> Result<Option<bool>> {
 }
 
 fn warn_ignored_env_vars() {
-    for name in IGNORED_ENV_VARS {
+    for (name, replacement) in RENAMED_ENV_VARS {
         if env::var_os(name).is_some() {
-            eprintln!("Warning: {name} is ignored; set it in the admin panel ({SETTINGS_FILE}).");
+            eprintln!("Warning: {name} is ignored; use {replacement} instead.");
         }
     }
 }

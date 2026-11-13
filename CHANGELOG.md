@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-13
+
+### Added
+
+- Settings from environment variables, for containers: `BIND_ADDR`, `BIND_PORT_HTTP`, `BIND_PORT_HTTPS`, `TRUSTED_PROXIES`, and `EXTERNAL_FQDN` (the public host name, which becomes `https://<name>`). Each one set is applied at every start and saved to `settings.json`; the admin panel shows its field as read-only and refuses to change it. A value that cannot be parsed stops startup and names the variable.
+
+### Changed
+
+- `BIND_ADDR` and `TRUSTED_PROXIES` are read again, as in 1.x. `BIND_PORT` is renamed `BIND_PORT_HTTP`; the old name only prints a warning.
+
+### Fixed
+
+- Every log line is flushed to the file before the write returns, so the last events are in the file when a restart replaces the process.
+
 ## [2.0.1] - 2026-11-13
 
 ### Added
