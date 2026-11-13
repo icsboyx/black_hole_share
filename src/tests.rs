@@ -126,6 +126,15 @@ async fn pages_carry_security_headers() {
 }
 
 #[actix_web::test]
+async fn admin_and_file_pages_are_served() {
+    let app = test_app!(test_state().await);
+    for path in ["/admin", "/files", &format!("/f/{}", uuid::Uuid::new_v4()), "/admin-common.js"] {
+        let response = test::call_service(&app, TestRequest::get().uri(path).to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+}
+
+#[actix_web::test]
 async fn unknown_path_returns_404() {
     let app = test_app!(test_state().await);
     let request = TestRequest::get().uri("/does-not-exist").to_request();

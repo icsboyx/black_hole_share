@@ -2,31 +2,13 @@
 // Anonymous visitors never see it. Hiding it is a UI choice, not a security measure:
 // the admin API checks the session on every request regardless.
 (() => {
+  // Services first (public upload, file sharing), then the pages about the service.
   const LINKS = [
     { label: "Upload", href: "/" },
+    { label: "Files", href: "/files" },
     { label: "Stats", href: "/stats" },
-    { label: "Files", href: "/admin#files" },
     { label: "Admin", href: "/admin" },
   ];
-
-  // "/admin#files" is current only on that tab; "/admin" on every other admin tab.
-  function isCurrent(href) {
-    const [path, hash] = href.split("#");
-    if (window.location.pathname !== path) return false;
-    const currentHash = window.location.hash.slice(1);
-    if (hash) return currentHash === hash;
-    return !LINKS.some((link) => link.href === `${path}#${currentHash}`);
-  }
-
-  function markCurrent(links) {
-    for (const link of links.querySelectorAll("a")) {
-      if (isCurrent(link.getAttribute("href"))) {
-        link.setAttribute("aria-current", "page");
-      } else {
-        link.removeAttribute("aria-current");
-      }
-    }
-  }
 
   function build(username) {
     const nav = document.createElement("nav");
@@ -45,9 +27,11 @@
       const link = document.createElement("a");
       link.href = href;
       link.textContent = label;
+      if (window.location.pathname === href) {
+        link.setAttribute("aria-current", "page");
+      }
       links.append(link);
     }
-    markCurrent(links);
 
     const logout = document.createElement("button");
     logout.type = "button";
@@ -87,12 +71,6 @@
       document.body.insertBefore(build(status.username), scrollArea);
     }
   }
-
-  // Registered once: the bar is rebuilt on every refresh, so look it up each time.
-  window.addEventListener("hashchange", () => {
-    const links = document.querySelector(".admin-nav-links");
-    if (links) markCurrent(links);
-  });
 
   // The admin page calls this after login, logout or an expired session.
   window.bhsNav = { refresh };

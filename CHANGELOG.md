@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Admin panel tabs (Overview, Settings, Account); settings are split into sections per type, each saved on its own, with "Restore defaults".
 - File sharing for the admin: any file type stored on disk in `data/storage/`, shared through `/f/{id}` with an expiry, an optional download limit, and an optional opening time. Uploads stream to disk with progress; downloads are always whole-file attachments and each one is counted. Files survive restarts; orphaned or partial files are cleaned up at startup.
 - File sharing limits in the settings: max file size, total disk space, max duration.
-- "Files" tab in the admin panel and a "Files" link in the admin bar.
+- `/files` page for the admin to share and manage files, linked from the admin bar (Upload · Files · Stats · Admin); the admin panel keeps the management tabs (Overview, Settings, Account).
+- Admin page helpers moved to `admin-common.js` and admin styles to `style.css`, shared by `admin.html` and `files.html`.
 
 ### Changed
 

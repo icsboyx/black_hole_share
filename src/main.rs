@@ -141,6 +141,20 @@ async fn view_asset(
     get_static_file(path).await
 }
 
+#[get("/files")]
+async fn files_page(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "files.html");
+    app_state
+        .log_file
+        .write_event(LogEventType::HttpRequest(req.into()))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
+    get_static_file(path).await
+}
+
 #[get("/f/{id}")]
 async fn file_page(
     req: HttpRequest,
@@ -254,6 +268,7 @@ fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::Sess
         .service(stats)
         .service(admin_page)
         .service(view_asset)
+        .service(files_page)
         .service(file_page)
         .service(api_file_info)
         .service(api_file_download)

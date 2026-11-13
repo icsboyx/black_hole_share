@@ -206,6 +206,7 @@ bhs.example.com {
 | `GET` | `/bhs/{id}` | View a shared asset |
 | `GET` | `/stats` | Statistics dashboard |
 | `GET` | `/admin` | Admin control panel (login required) |
+| `GET` | `/files` | File sharing for the admin (login required) |
 | `GET` | `/f/{id}` | Download page of a shared file |
 
 Unknown paths return the error page with status `404`.
@@ -336,8 +337,16 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 - Usage cards: active assets, storage, totals since startup
 - Active uploads grouped by uploader IP
 - Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
-- Tabs: **Overview** (usage, uploads by IP, active assets), **Files**, **Settings**, **Account** (password); the tab is kept in the URL (`/admin#files`)
-- Files: drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time; upload with progress and cancel; list with downloads, status, copy link, and delete
+- Tabs: **Overview** (usage, uploads by IP, active assets, shared file storage), **Settings**, **Account** (password); the tab is kept in the URL (`/admin#settings`)
+- The admin bar on every page links the services first (Upload, Files) and then Stats and Admin
+
+### File sharing page
+
+`/files` is a service page, separate from the panel's management tabs. Without an admin session it only shows a link to the login; the file API refuses every request without a session anyway.
+
+- Drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time
+- Upload with progress, speed, and cancel
+- List of shared files with downloads, status, copy link, and delete
 - Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
 - Password change
 
