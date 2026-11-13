@@ -8,6 +8,7 @@ flowchart TD
         Proxy["Reverse proxy (optional)"]
         HtmlFiles[("data/html/")]
         LogFiles[("data/logs/")]
+        AdminFiles[("data/admin/")]
 
         subgraph Process["Application"]
             subgraph Web["Actix Web server"]
@@ -16,6 +17,7 @@ flowchart TD
                 Upload["POST /api/upload"]
                 Content["GET /api/content/{id}"]
                 Stats["GET /api/stats"]
+                Admin["/api/admin/* (session cookie)"]
             end
 
             subgraph Background["Background task"]
@@ -27,6 +29,7 @@ flowchart TD
                 Limit["Per-IP rate limiter"]
                 Logger["Log writer"]
                 Counters["In-memory stats counters"]
+                Creds["Admin credential store"]
             end
         end
     end
@@ -39,6 +42,13 @@ flowchart TD
     Headers --> Upload
     Headers --> Content
     Headers --> Stats
+    Headers --> Admin
+
+    Admin --> Creds
+    Admin --> Store
+    Admin --> Limit
+    Admin --> Logger
+    Creds --> AdminFiles
 
     Pages --> HtmlFiles
     Pages --> Logger
@@ -65,10 +75,10 @@ flowchart TD
     classDef task fill:#1a1a1a,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
     classDef state fill:#1a1a1a,stroke:#00ff99,stroke-width:2px,color:#cdd6f4
 
-    class Client,Proxy,HtmlFiles,LogFiles external
-    class Headers,Pages,Upload,Content,Stats web
+    class Client,Proxy,HtmlFiles,LogFiles,AdminFiles external
+    class Headers,Pages,Upload,Content,Stats,Admin web
     class Cleanup task
-    class Store,Limit,Logger,Counters state
+    class Store,Limit,Logger,Counters,Creds state
 
     style Overview fill:#1a1a1a,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Process fill:#1e1e2e,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
@@ -85,3 +95,4 @@ flowchart TD
 - Assets, rate limits, and stats counters live only in memory and are lost on restart.
 - `/api/stats` reads memory only. The log files are written but never read back.
 - The client address comes from `X-Forwarded-For` only when the request arrives from a proxy in `TRUSTED_PROXIES`.
+- Admin credentials and the session key are the only state kept on disk besides logs; everything else is lost on restart.

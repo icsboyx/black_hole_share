@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::auth::CredentialStore;
 use crate::logs::LogFile;
 use crate::{MAX_ASSETS, MAX_TOTAL_STORAGE_BYTES};
 use crate::{MAX_UPLOADS_PER_USER, logs::LogEventType};
@@ -101,6 +102,7 @@ pub struct AppState {
     pub assets: AssetStorage,
     pub connection_tracker: RateLimiter,
     pub log_file: LogFile,
+    pub admin: CredentialStore,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -200,6 +202,20 @@ impl AssetStorage {
             .cloned()
     }
 
+    /// Snapshot of the assets that have not expired yet, oldest first.
+    /// Cloning is cheap: the content is reference counted, not copied.
+    pub async fn active_list(&self) -> Vec<Asset> {
+        let assets = self.assets.lock().await;
+        assets.iter().filter(|a| !a.is_expired()).cloned().collect()
+    }
+
+    /// Removes an asset before it expires. Returns it so the caller can log the deletion.
+    pub async fn remove_asset(&self, id: &Uuid) -> Option<Asset> {
+        let mut assets = self.assets.lock().await;
+        let index = assets.iter().position(|asset| asset.id == *id)?;
+        Some(assets.remove(index))
+    }
+
     pub async fn assets_len(&self) -> usize {
         self.assets.lock().await.len()
     }
@@ -256,7 +272,7 @@ impl RateLimiter {
 }
 
 /// A log failure must never stop cleanup: expired assets have to go away regardless.
-async fn log_removed_assets(removed: &[Asset], log: &LogFile) {
+pub(crate) async fn log_removed_assets(removed: &[Asset], log: &LogFile) {
     for asset in removed {
         println!(
             "[{}] Removing asset: {}",

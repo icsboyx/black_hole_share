@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>Black Hole Share - Admin</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/nav.js" defer></script>
+  <style>
+    .panel {
+      background-color: var(--bg-secondary);
+      border: 2px solid var(--border-color);
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 20px;
+      transition: all 0.3s ease;
+    }
+
+    .panel:hover {
+      border-color: var(--border-hover);
+      box-shadow: 0 4px 15px rgba(0, 255, 153, 0.2);
+    }
+
+    .panel h2 {
+      color: var(--accent-cyan);
+      margin: 0 0 15px 0;
+      font-size: 1.2em;
+    }
+
+    .auth-panel {
+      width: 420px;
+      margin: 40px auto 0 auto;
+    }
+
+    .form-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .form-row label {
+      color: var(--text-secondary);
+      font-size: 0.9em;
+    }
+
+    .form-row input {
+      background-color: var(--bg-primary);
+      border: 1px solid var(--inactive-gray);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 1em;
+      padding: 10px;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .form-row input:focus {
+      border-color: var(--accent-cyan);
+      outline: none;
+    }
+
+    .hint {
+      color: var(--text-secondary);
+      font-size: 0.85em;
+      margin: 0 0 14px 0;
+    }
+
+    .message {
+      min-height: 1.2em;
+      margin: 10px 0 0 0;
+      font-size: 0.9em;
+    }
+
+    .message.error {
+      color: #ff6666;
+    }
+
+    .message.ok {
+      color: var(--accent-green);
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 10px;
+      color: var(--text-secondary);
+    }
+
+    .small-btn {
+      background-color: var(--border-color);
+      color: var(--bg-tertiary);
+      border: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: bold;
+      font-family: inherit;
+      transition: all 0.2s ease;
+    }
+
+    .small-btn:hover {
+      background-color: var(--border-hover);
+    }
+
+    .small-btn.danger {
+      background-color: rgba(255, 102, 102, 0.2);
+      color: #ff6666;
+    }
+
+    .small-btn.danger:hover {
+      background-color: #ff6666;
+      color: var(--bg-tertiary);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(160px, 1fr));
+      gap: 20px;
+      margin-top: 20px;
+    }
+
+    .stat-card {
+      background-color: var(--bg-secondary);
+      border: 2px solid var(--border-color);
+      border-radius: 12px;
+      padding: 16px;
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 1.4em;
+      font-weight: bold;
+      color: var(--accent-cyan);
+      margin: 8px 0 0 0;
+    }
+
+    .stat-label {
+      color: var(--text-secondary);
+      font-size: 0.8em;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85em;
+    }
+
+    th {
+      color: var(--text-secondary);
+      text-align: left;
+      font-weight: normal;
+      text-transform: uppercase;
+      font-size: 0.85em;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--inactive-gray);
+    }
+
+    td {
+      padding: 8px;
+      border-bottom: 1px solid var(--inactive-gray);
+      white-space: nowrap;
+    }
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    td a {
+      color: var(--accent-cyan);
+      text-decoration: none;
+    }
+
+    td a:hover {
+      color: var(--accent-green);
+    }
+
+    .table-wrap {
+      max-height: 320px;
+      overflow: auto;
+    }
+
+    .empty {
+      color: var(--text-secondary);
+    }
+
+    .password-form {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    .password-form .form-row {
+      margin-bottom: 0;
+    }
+
+    [hidden] {
+      display: none !important;
+    }  </style>
+</head>
+
+<body class="view-page">
+  <main class="page-scroll">
+    <div class="page-column">
+      <h1><a href="/" class="home-link">Black Hole Share</a> - Admin</h1>
+
+      <p id="loading" class="hint" style="text-align: center">Loading...</p>
+
+      <section id="setupView" class="panel auth-panel" hidden>
+        <h2>Create admin account</h2>
+        <p class="hint">No admin account exists yet. The account created here is the only one that can open
+          this panel.</p>
+        <form id="setupForm" autocomplete="on">
+          <div class="form-row">
+            <label for="setupUsername">Username</label>
+            <input id="setupUsername" name="username" autocomplete="username" required maxlength="64" />
+          </div>
+          <div class="form-row">
+            <label for="setupPassword">Password (at least 8 characters)</label>
+            <input id="setupPassword" name="password" type="password" autocomplete="new-password" required
+              minlength="8" maxlength="256" />
+          </div>
+          <div class="form-row">
+            <label for="setupConfirm">Repeat password</label>
+            <input id="setupConfirm" type="password" autocomplete="new-password" required minlength="8"
+              maxlength="256" />
+          </div>
+          <button class="upload-btn" type="submit" style="width: 100%">Create account</button>
+          <p id="setupMessage" class="message"></p>
+        </form>
+      </section>
+
+      <section id="loginView" class="panel auth-panel" hidden>
+        <h2>Admin login</h2>
+        <form id="loginForm" autocomplete="on">
+          <div class="form-row">
+            <label for="loginUsername">Username</label>
+            <input id="loginUsername" name="username" autocomplete="username" required />
+          </div>
+          <div class="form-row">
+            <label for="loginPassword">Password</label>
+            <input id="loginPassword" name="password" type="password" autocomplete="current-password" required />
+          </div>
+          <button class="upload-btn" type="submit" style="width: 100%">Log in</button>
+          <p id="loginMessage" class="message"></p>
+        </form>
+      </section>
+
+      <section id="dashboardView" hidden>
+        <!-- User name and Log out live in the admin bar (nav.js). -->
+        <div class="toolbar">
+          <button id="refreshBtn" class="small-btn" type="button">Refresh</button>
+        </div>
+
+        <div id="statsGrid" class="stats-grid"></div>
+
+        <div class="panel">
+          <h2>Active uploads by IP</h2>
+          <div class="table-wrap" id="uploadersTable"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Active assets</h2>
+          <p id="assetsMessage" class="message"></p>
+          <div class="table-wrap" id="assetsTable"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Change password</h2>
+          <p class="hint">Changing the password logs out every other session.</p>
+          <form id="passwordForm" class="password-form">
+            <div class="form-row">
+              <label for="currentPassword">Current</label>
+              <input id="currentPassword" type="password" autocomplete="current-password" required />
+            </div>
+            <div class="form-row">
+              <label for="newPassword">New</label>
+              <input id="newPassword" type="password" autocomplete="new-password" required minlength="8"
+                maxlength="256" />
+            </div>
+            <div class="form-row">
+              <label for="confirmPassword">Repeat new</label>
+              <input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8"
+                maxlength="256" />
+            </div>
+            <button class="small-btn" type="submit">Change</button>
+          </form>
+          <p id="passwordMessage" class="message"></p>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  {{FOOTER}}
+
+  <script>
+    const views = ["loading", "setupView", "loginView", "dashboardView"];
+    let refreshTimer = null;
+
+    function show(viewId) {
+      for (const id of views) {
+        document.getElementById(id).hidden = id !== viewId;
+      }
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+      if (viewId === "dashboardView") {
+        setMessage("assetsMessage", "");
+        setMessage("passwordMessage", "");
+        refreshTimer = setInterval(loadDashboard, 30000);
+      }
+      // Login state may have changed: let the admin bar show or hide itself.
+      // nav.js is deferred, so it is not loaded yet on the first call; it checks by itself.
+      window.bhsNav?.refresh();
+    }
+
+    function setMessage(id, text, kind = "error") {
+      const element = document.getElementById(id);
+      element.textContent = text;
+      element.className = `message ${kind}`;
+    }
+
+    // Builds DOM nodes; strings become text nodes, so server data is never parsed as HTML.
+    function el(tag, props = {}, ...children) {
+      const node = document.createElement(tag);
+      Object.assign(node, props);
+      for (const child of children) {
+        node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+      }
+      return node;
+    }
+
+    async function api(path, options = {}) {
+      const init = { method: options.method || "GET", headers: {} };
+      if (options.body !== undefined) {
+        init.headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(options.body);
+      }
+      const response = await fetch(`/api/admin${path}`, init);
+      let data = null;
+      const type = response.headers.get("content-type") || "";
+      if (type.includes("application/json")) {
+        data = await response.json();
+      }
+      return { response, data };
+    }
+
+    function errorText(result, fallback) {
+      return (result.data && result.data.error) || `${fallback} (HTTP ${result.response.status})`;
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return "0 B";
+      const k = 1024;
+      const sizes = ["B", "KB", "MB", "GB"];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    function formatTime(millis) {
+      return new Date(millis).toLocaleString("en-GB", { hour12: false });
+    }
+
+    function formatRemaining(expiresAt) {
+      const seconds = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+    }
+
+    function table(headers, rows) {
+      if (rows.length === 0) {
+        return el("p", { className: "empty" }, "Nothing here.");
+      }
+      return el(
+        "table",
+        {},
+        el("thead", {}, el("tr", {}, ...headers.map((h) => el("th", {}, h)))),
+        el("tbody", {}, ...rows)
+      );
+    }
+
+    // Called after the server accepted setup or login. If the next request is still
+    // anonymous, the browser dropped the session cookie; say so instead of looping.
+    async function afterAuth(messageId) {
+      const result = await api("/status");
+      if (result.response.ok && result.data.configured && !result.data.authenticated) {
+        show("loginView");
+        setMessage(
+          messageId === "setupMessage" ? "loginMessage" : messageId,
+          "The server accepted the credentials, but the browser did not keep the session cookie. " +
+          "Open the panel over HTTPS or via http://localhost, or start the server with ADMIN_COOKIE_SECURE=false."
+        );
+        return;
+      }
+      await init();
+    }
+
+    async function init() {
+      const result = await api("/status");
+      if (!result.response.ok) {
+        show("loading");
+        document.getElementById("loading").textContent = errorText(result, "Cannot reach the server");
+        return;
+      }
+      const status = result.data;
+      if (!status.configured) {
+        show("setupView");
+      } else if (!status.authenticated) {
+        show("loginView");
+      } else {
+        show("dashboardView");
+        await loadDashboard();
+      }
+    }
+
+    async function loadDashboard() {
+      const [stats, assets] = await Promise.all([api("/stats"), api("/assets")]);
+      if (stats.response.status === 401 || assets.response.status === 401) {
+        show("loginView");
+        setMessage("loginMessage", "Your session has ended. Please log in again.");
+        return;
+      }
+      if (!stats.response.ok || !assets.response.ok) {
+        setMessage("assetsMessage", errorText(stats.response.ok ? assets : stats, "Failed to load data"));
+        return;
+      }
+      renderStats(stats.data);
+      renderUploaders(stats.data.uploaders);
+      renderAssets(assets.data);
+    }
+
+    function renderStats(stats) {
+      const cards = [
+        ["Active assets", `${stats.active_assets} / ${stats.max_assets}`],
+        ["Storage used", `${formatBytes(stats.storage_bytes)} / ${formatBytes(stats.max_storage_bytes)}`],
+        ["Uploaders", stats.uploaders.length],
+        ["Total uploads", stats.total_uploads],
+        ["Total deleted", stats.total_deleted],
+        ["Total requests", stats.total_requests],
+      ];
+      document.getElementById("statsGrid").replaceChildren(
+        ...cards.map(([label, value]) =>
+          el("div", { className: "stat-card" },
+            el("div", { className: "stat-label" }, label),
+            el("div", { className: "stat-value" }, value))
+        )
+      );
+    }
+
+    function renderUploaders(uploaders) {
+      const rows = uploaders.map((u) =>
+        el("tr", {}, el("td", {}, u.ip), el("td", {}, `${u.active_assets}`), el("td", {}, formatBytes(u.bytes)))
+      );
+      document.getElementById("uploadersTable").replaceChildren(
+        table(["IP", "Active uploads", "Size"], rows)
+      );
+    }
+
+    function renderAssets(assets) {
+      const rows = assets.map((asset) => {
+        const deleteBtn = el("button", { className: "small-btn danger", type: "button" }, "Delete");
+        deleteBtn.addEventListener("click", () => deleteAsset(asset.id));
+        return el(
+          "tr",
+          {},
+          el("td", {}, el("a", { href: `/bhs/${asset.id}`, target: "_blank", rel: "noopener" }, asset.id.slice(0, 8))),
+          el("td", {}, asset.mime),
+          el("td", {}, formatBytes(asset.size_bytes)),
+          el("td", {}, asset.uploader_ip || "-"),
+          el("td", {}, formatTime(asset.created_at)),
+          el("td", {}, formatRemaining(asset.expires_at)),
+          el("td", {}, deleteBtn)
+        );
+      });
+      document.getElementById("assetsTable").replaceChildren(
+        table(["ID", "Type", "Size", "Uploader", "Created", "Expires in", ""], rows)
+      );
+    }
+
+    async function deleteAsset(id) {
+      if (!confirm(`Delete asset ${id}?`)) return;
+      const result = await api(`/assets/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (result.response.status === 204) {
+        setMessage("assetsMessage", "Asset deleted.", "ok");
+      } else if (result.response.status === 401) {
+        show("loginView");
+        return;
+      } else {
+        setMessage("assetsMessage", errorText(result, "Delete failed"));
+      }
+      await loadDashboard();
+    }
+
+    document.getElementById("setupForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = document.getElementById("setupUsername").value;
+      const password = document.getElementById("setupPassword").value;
+      if (password !== document.getElementById("setupConfirm").value) {
+        setMessage("setupMessage", "Passwords do not match.");
+        return;
+      }
+      const result = await api("/setup", { method: "POST", body: { username, password } });
+      if (result.response.ok) {
+        await afterAuth("setupMessage");
+      } else if (result.response.status === 409) {
+        show("loginView");
+        setMessage("loginMessage", "An admin account already exists. Please log in.");
+      } else {
+        setMessage("setupMessage", errorText(result, "Setup failed"));
+      }
+    });
+
+    document.getElementById("loginForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const username = document.getElementById("loginUsername").value;
+      const password = document.getElementById("loginPassword").value;
+      const result = await api("/login", { method: "POST", body: { username, password } });
+      if (result.response.ok) {
+        document.getElementById("loginForm").reset();
+        setMessage("loginMessage", "");
+        await afterAuth("loginMessage");
+      } else {
+        setMessage("loginMessage", errorText(result, "Login failed"));
+      }
+    });
+
+    document.getElementById("passwordForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const current_password = document.getElementById("currentPassword").value;
+      const new_password = document.getElementById("newPassword").value;
+      if (new_password !== document.getElementById("confirmPassword").value) {
+        setMessage("passwordMessage", "New passwords do not match.");
+        return;
+      }
+      const result = await api("/password", { method: "POST", body: { current_password, new_password } });
+      if (result.response.status === 204) {
+        document.getElementById("passwordForm").reset();
+        setMessage("passwordMessage", "Password changed.", "ok");
+      } else if (result.response.status === 401) {
+        show("loginView");
+      } else {
+        setMessage("passwordMessage", errorText(result, "Password change failed"));
+      }
+    });
+
+    document.getElementById("refreshBtn").addEventListener("click", loadDashboard);
+
+    init();
+  </script>
+</body>
+
+</html>

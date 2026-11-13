@@ -20,16 +20,17 @@
   box-sizing: border-box;
 }
 
-/* Main layout container */
+/* Page layout: a full-height column of scroll area + footer. Only .page-scroll scrolls,
+   so the footer never covers content and the scrollbar stops above it. */
+html {
+  height: 100%;
+}
+
 body {
   font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace, Arial, sans-serif;
-  min-width: 640px;
-  min-height: 360px;
-  width: 660px;
   height: 100vh;
-  margin: 0 auto;
-  padding: 20px;
-  padding-bottom: 80px;
+  height: 100dvh;
+  margin: 0;
   background-color: var(--bg-tertiary);
   background-image:
     radial-gradient(1200px 800px at 10% -20%, var(--bg-glow), transparent 60%),
@@ -40,7 +41,79 @@ body {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
+  overflow: hidden;
+}
+
+/* Full window width, so the mouse wheel also scrolls over the side margins. */
+.page-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+}
+
+/* Centered content column inside the scroll area. */
+.page-column {
+  width: 660px;
+  min-height: 100%;
+  margin: 0 auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+}
+
+body.view-page .page-column {
+  width: 860px;
+}
+
+/* Admin navigation bar (nav.js): only rendered for a logged-in admin, above the scroll area. */
+.admin-nav {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 20px;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.9em;
+}
+
+.admin-nav-user {
+  color: var(--text-secondary);
+}
+
+.admin-nav-user strong {
+  color: var(--accent-green);
+}
+
+.admin-nav-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.admin-nav-links a,
+.admin-nav-links button {
+  color: var(--text-primary);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.admin-nav-links a:hover,
+.admin-nav-links button:hover {
+  color: var(--accent-green);
+  border-color: var(--border-hover);
+}
+
+.admin-nav-links a[aria-current="page"] {
+  color: var(--bg-tertiary);
+  background-color: var(--accent-cyan);
 }
 
 h1 {
@@ -545,11 +618,6 @@ h1 .home-link:hover {
 }
 
 /* View page styles */
-body.view-page {
-  width: 860px;
-  padding-bottom: 80px;
-}
-
 .view-container {
   display: flex;
   flex-direction: column;
@@ -559,19 +627,15 @@ body.view-page {
   margin-top: 20px;
 }
 
+/* Last item of the body column, below the scroll area: never overlaps the content. */
 .powered-by {
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  flex-shrink: 0;
   text-align: center;
   padding: 15px;
   background-color: var(--bg-secondary);
   border-top: 1px solid var(--border-color);
   font-size: 0.9em;
   color: var(--text-secondary);
-  width: 100%;
-  z-index: 10;
 }
 
 .powered-by .home-link {

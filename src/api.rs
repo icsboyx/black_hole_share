@@ -1,7 +1,6 @@
 use actix_web::{HttpRequest, HttpResponse, get, post, web};
 use base64::{Engine, engine::general_purpose};
 
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -25,9 +24,6 @@ async fn api_upload(
     body: web::Json<UploadRequest>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
-    // Check for rate limiting
-    let now = Utc::now().timestamp_millis();
-
     let uploader_ip = crate::client_ip(&req)
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Cannot determine client ip"))?;
 
@@ -64,7 +60,15 @@ async fn api_upload(
     }
 
     let clamped_duration = body.duration.clamp(MIN_ASSET_DURATION, MAX_ASSET_DURATION);
-    let asset_expiration_time = now + (clamped_duration as i64 * 60 * 1000);
+    let asset = crate::data_mgt::Asset::new(
+        clamped_duration,
+        body.content_type.clone(),
+        content_bytes,
+        Some(uploader_ip.clone()),
+    );
+    // The limiter slot is keyed by the asset's own expiry, so deleting the asset early
+    // (admin panel) or failing to store it can give back exactly this slot.
+    let asset_expiration_time = asset.expires_at();
     let (allowed, retry_after_ms) = app_state
         .connection_tracker
         .check(&uploader_ip, asset_expiration_time)
@@ -80,13 +84,6 @@ async fn api_upload(
         // return Ok(HttpResponse::TooManyRequests().body("Upload limit exceeded"));
         return Ok(HttpResponse::TooManyRequests().json(response_body));
     }
-
-    let asset = crate::data_mgt::Asset::new(
-        clamped_duration,
-        body.content_type.clone(),
-        content_bytes,
-        Some(uploader_ip.clone()),
-    );
 
     let id = asset.id();
 
@@ -180,7 +177,9 @@ async fn api_stats(app_state: web::Data<AppState>) -> Result<HttpResponse, actix
             let (action, asset) = match line.event {
                 LogEventType::AssetUploaded(asset) => ("upload", asset),
                 LogEventType::AssetDeleted(asset) => ("delete", asset),
-                LogEventType::HttpRequest(_) | LogEventType::Error(_) => return None,
+                LogEventType::HttpRequest(_) | LogEventType::Error(_) | LogEventType::Admin(_) => {
+                    return None;
+                }
             };
             let asset = serde_json::from_value::<Asset>(asset).unwrap_or_default();
             Some(ActivityItem {

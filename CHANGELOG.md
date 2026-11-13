@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Admin control panel at `/admin`: list and delete active assets, uploads per IP, usage against limits, password change.
+- First-login setup of a single admin account; credentials are stored as an Argon2id hash in `data/admin/credentials.json`.
+- Encrypted, `HttpOnly`, `SameSite=Strict` session cookie limited to `/api/admin`, valid for at most 8 hours; logout and password change end every session.
+- `ADMIN_COOKIE_SECURE` environment variable to allow the admin cookie over plain HTTP.
+- Admin actions, including failed logins, are written to the log.
+
 ### Changed
 
 - `GET /api/content/{id}` returns 400 instead of 404 when `{id}` is not a valid UUID.
+
+### Fixed
+
+- On every page only the content area scrolls; the footer stays below it and no longer covers the end of long pages.
+
+- The per-IP upload limit is keyed by the asset's own expiry time, so releasing a slot always frees the right one.
 
 ## [1.3.0] - 2026-11-04
 

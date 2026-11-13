@@ -1,4 +1,6 @@
+mod admin;
 mod api;
+mod auth;
 mod data_mgt;
 mod logs;
 #[cfg(test)]
@@ -24,6 +26,9 @@ use std::{
 
 pub static HTML_DIR: &str = "data/html/";
 pub static LOG_DIR: &str = "data/logs/";
+// Admin secrets live outside data/html/ so they can never be served as static files.
+pub static ADMIN_CREDENTIALS_FILE: &str = "data/admin/credentials.json";
+pub static SESSION_KEY_FILE: &str = "data/admin/session.key";
 pub static LOG_FILE_NAME: &str = "log.txt";
 pub static MAX_LOG_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50 MB, then rotate while running
 pub static MAX_ROTATED_LOGS: usize = 10; // older rotated logs are deleted
@@ -135,6 +140,20 @@ async fn stats(
     get_static_file(path).await
 }
 
+#[get("/admin")]
+async fn admin_page(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "admin.html");
+    app_state
+        .log_file
+        .write_event(LogEventType::HttpRequest(req.into()))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
+    get_static_file(path).await
+}
+
 #[get("/bhs/{id}")]
 async fn view_asset(
     req: HttpRequest,
@@ -183,10 +202,20 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to create or open log file");
 
+    let admin = auth::CredentialStore::load(ADMIN_CREDENTIALS_FILE).await?;
+    if !admin.is_configured().await {
+        println!("Admin credentials not set: the first visitor of /admin can create them.");
+    }
+    let session_settings = admin::SessionSettings {
+        key: auth::load_or_create_session_key(Path::new(SESSION_KEY_FILE)).await?,
+        cookie_secure: admin_cookie_secure()?,
+    };
+
     let app_state = data_mgt::AppState {
         assets: data_mgt::AssetStorage::new(),
         connection_tracker: data_mgt::RateLimiter::default(),
         log_file,
+        admin,
     };
 
     println!("Starting server at http://{}:{}/", *BIND_ADDR, *BIND_PORT);
@@ -205,7 +234,7 @@ async fn main() -> Result<()> {
         App::new()
             .wrap(security_headers())
             .app_data(web::Data::new(app_state.clone()))
-            .configure(configure_routes)
+            .configure(|cfg| configure_routes(cfg, &session_settings))
     })
     .bind((BIND_ADDR.clone(), *BIND_PORT))?
     .run()
@@ -222,16 +251,31 @@ fn security_headers() -> DefaultHeaders {
         .add(("Referrer-Policy", "no-referrer"))
 }
 
-fn configure_routes(cfg: &mut web::ServiceConfig) {
+fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::SessionSettings) {
     // Uploaded images are sent as base64 inside JSON, which is larger than the decoded asset.
     cfg.app_data(web::JsonConfig::default().limit(MAX_ASSET_SIZE_BYTES * 2))
         .service(index)
         .service(stats)
+        .service(admin_page)
         .service(view_asset)
         .service(api_get_asset)
         .service(api_upload)
-        .service(api_stats)
-        .service(catch_all);
+        .service(api_stats);
+    // Must be registered before the catch-all, which matches every path.
+    admin::configure(cfg, session_settings);
+    cfg.service(catch_all);
+}
+
+/// `ADMIN_COOKIE_SECURE=false` lets the admin cookie work over plain HTTP. Any value other
+/// than `true` or `false` stops the server instead of silently weakening the cookie.
+fn admin_cookie_secure() -> Result<bool> {
+    match env::var("ADMIN_COOKIE_SECURE") {
+        Err(env::VarError::NotPresent) => Ok(true),
+        Ok(value) if value == "true" => Ok(true),
+        Ok(value) if value == "false" => Ok(false),
+        Ok(value) => anyhow::bail!("ADMIN_COOKIE_SECURE must be 'true' or 'false', got '{value}'"),
+        Err(e) => anyhow::bail!("ADMIN_COOKIE_SECURE is not valid UTF-8: {e}"),
+    }
 }
 
 fn parse_trusted_proxies(value: &str) -> Vec<IpAddr> {

@@ -5,3 +5,4 @@
 /data/logs/*
 my_docker-compose.yaml
 .history/
+/data/admin/

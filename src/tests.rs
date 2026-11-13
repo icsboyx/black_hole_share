@@ -6,6 +6,8 @@ use std::{
 
 use actix_web::{
     App,
+    cookie::{Cookie, Key, SameSite},
+    dev::ServiceResponse,
     http::{StatusCode, header},
     test::{self, TestRequest},
     web,
@@ -14,6 +16,8 @@ use serde_json::{Value, json};
 
 use crate::{
     CONTENT_CSP, MAX_ASSET_SIZE_BYTES, MAX_TOTAL_STORAGE_BYTES, MAX_UPLOADS_PER_USER, PAGE_CSP,
+    admin::{SESSION_COOKIE_NAME, SessionSettings},
+    auth::{CredentialStore, load_or_create_session_key},
     configure_routes,
     data_mgt::{AppState, Asset, AssetStorage, RateLimiter},
     logs::{LogEventType, LogFile},
@@ -27,10 +31,24 @@ fn temp_dir() -> PathBuf {
 }
 
 async fn test_state() -> AppState {
+    state_in(&temp_dir()).await
+}
+
+async fn state_in(dir: &std::path::Path) -> AppState {
     AppState {
         assets: AssetStorage::new(),
         connection_tracker: RateLimiter::default(),
-        log_file: LogFile::new(temp_dir().join("log.txt")).await.unwrap(),
+        log_file: LogFile::new(dir.join("log.txt")).await.unwrap(),
+        admin: CredentialStore::load(dir.join("admin/credentials.json"))
+            .await
+            .unwrap(),
+    }
+}
+
+fn test_session_settings() -> SessionSettings {
+    SessionSettings {
+        key: Key::generate(),
+        cookie_secure: true,
     }
 }
 
@@ -51,7 +69,7 @@ macro_rules! test_app {
             App::new()
                 .wrap(security_headers())
                 .app_data(web::Data::new($state))
-                .configure(configure_routes),
+                .configure(|cfg| configure_routes(cfg, &test_session_settings())),
         )
         .await
     };
@@ -201,11 +219,7 @@ async fn limiter_forgets_clients_with_no_active_uploads() {
 #[actix_web::test]
 async fn stats_come_from_memory_not_from_the_log_file() {
     let dir = temp_dir();
-    let state = AppState {
-        assets: AssetStorage::new(),
-        connection_tracker: RateLimiter::default(),
-        log_file: LogFile::new(dir.join("log.txt")).await.unwrap(),
-    };
+    let state = state_in(&dir).await;
     let app = test_app!(state);
     let _ = upload_text!(&app);
     fs::remove_file(dir.join("log.txt")).unwrap();
@@ -240,4 +254,248 @@ async fn log_file_creates_a_missing_directory() {
     let path = temp_dir().join("missing/logs/log.txt");
     LogFile::new(&path).await.unwrap();
     assert!(path.exists());
+}
+
+// ---------------------------------------------------------------- admin panel
+
+const ADMIN_USER: &str = "admin";
+const ADMIN_PASSWORD: &str = "correct horse battery";
+
+fn admin_cookie<B>(response: &ServiceResponse<B>) -> Cookie<'static> {
+    response
+        .response()
+        .cookies()
+        .find(|cookie| cookie.name() == SESSION_COOKIE_NAME)
+        .expect("response sets the admin session cookie")
+        .into_owned()
+}
+
+fn admin_post(path: &str, body: Value) -> TestRequest {
+    TestRequest::post()
+        .uri(path)
+        .peer_addr(peer("192.0.2.50"))
+        .set_json(body)
+}
+
+fn admin_get(path: &str, cookie: &Cookie<'static>) -> TestRequest {
+    TestRequest::get().uri(path).cookie(cookie.clone())
+}
+
+macro_rules! admin_setup {
+    ($app:expr) => {{
+        let body = json!({ "username": ADMIN_USER, "password": ADMIN_PASSWORD });
+        let response = test::call_service($app, admin_post("/api/admin/setup", body).to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        admin_cookie(&response)
+    }};
+}
+
+macro_rules! admin_login {
+    ($app:expr, $password:expr) => {{
+        let body = json!({ "username": ADMIN_USER, "password": $password });
+        let response = test::call_service($app, admin_post("/api/admin/login", body).to_request()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        admin_cookie(&response)
+    }};
+}
+
+#[actix_web::test]
+async fn admin_setup_starts_a_session_and_happens_only_once() {
+    let app = test_app!(test_state().await);
+    let anonymous = TestRequest::get().uri("/api/admin/status").to_request();
+    let status: Value = test::call_and_read_body_json(&app, anonymous).await;
+    assert_eq!(status["configured"], false);
+    assert_eq!(status["authenticated"], false);
+
+    let cookie = admin_setup!(&app);
+    let status: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/status", &cookie).to_request())
+            .await;
+    assert_eq!(status["configured"], true);
+    assert_eq!(status["authenticated"], true);
+    assert_eq!(status["username"], ADMIN_USER);
+
+    let intruder = json!({ "username": "intruder", "password": "another password" });
+    let response = test::call_service(&app, admin_post("/api/admin/setup", intruder).to_request()).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[actix_web::test]
+async fn admin_setup_rejects_weak_input() {
+    let app = test_app!(test_state().await);
+    for body in [
+        json!({ "username": "admin", "password": "short" }),
+        json!({ "username": "", "password": ADMIN_PASSWORD }),
+        json!({ "username": " admin", "password": ADMIN_PASSWORD }),
+    ] {
+        let response = test::call_service(&app, admin_post("/api/admin/setup", body.clone()).to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+}
+
+#[actix_web::test]
+async fn admin_routes_require_login() {
+    let app = test_app!(test_state().await);
+    let _ = admin_setup!(&app);
+    let change = json!({ "current_password": ADMIN_PASSWORD, "new_password": "something else" });
+    let requests = [
+        TestRequest::get().uri("/api/admin/assets"),
+        TestRequest::get().uri("/api/admin/stats"),
+        TestRequest::delete().uri(&format!("/api/admin/assets/{}", uuid::Uuid::new_v4())),
+        admin_post("/api/admin/password", change),
+    ];
+    for request in requests {
+        let response = test::call_service(&app, request.to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+}
+
+#[actix_web::test]
+async fn admin_login_rejects_wrong_credentials() {
+    let app = test_app!(test_state().await);
+    let _ = admin_setup!(&app);
+    for (username, password) in [(ADMIN_USER, "wrong password"), ("someone", ADMIN_PASSWORD)] {
+        let body = json!({ "username": username, "password": password });
+        let response = test::call_service(&app, admin_post("/api/admin/login", body).to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{username}");
+        assert!(
+            response
+                .response()
+                .cookies()
+                .all(|cookie| cookie.name() != SESSION_COOKIE_NAME)
+        );
+    }
+}
+
+#[actix_web::test]
+async fn admin_session_cookie_is_locked_down() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.secure(), Some(true));
+    assert_eq!(cookie.same_site(), Some(SameSite::Strict));
+    assert_eq!(cookie.path(), Some("/api/admin"));
+
+    let response = test::call_service(&app, admin_get("/api/admin/status", &cookie).to_request()).await;
+    assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+}
+
+#[actix_web::test]
+async fn logout_revokes_the_session_cookie() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let logout = admin_post("/api/admin/logout", json!({})).cookie(cookie.clone());
+    let response = test::call_service(&app, logout.to_request()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    // A copy of the cookie taken before logout must not work anymore.
+    let response = test::call_service(&app, admin_get("/api/admin/assets", &cookie).to_request()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[actix_web::test]
+async fn password_change_revokes_other_sessions() {
+    let app = test_app!(test_state().await);
+    let first = admin_setup!(&app);
+    let second = admin_login!(&app, ADMIN_PASSWORD);
+
+    let wrong = json!({ "current_password": "not the password", "new_password": "a brand new password" });
+    let request = admin_post("/api/admin/password", wrong).cookie(first.clone());
+    let response = test::call_service(&app, request.to_request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let change = json!({ "current_password": ADMIN_PASSWORD, "new_password": "a brand new password" });
+    let request = admin_post("/api/admin/password", change).cookie(first);
+    let response = test::call_service(&app, request.to_request()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let renewed = admin_cookie(&response);
+
+    let response = test::call_service(&app, admin_get("/api/admin/assets", &second).to_request()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = test::call_service(&app, admin_get("/api/admin/assets", &renewed).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let old = json!({ "username": ADMIN_USER, "password": ADMIN_PASSWORD });
+    let response = test::call_service(&app, admin_post("/api/admin/login", old).to_request()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let _ = admin_login!(&app, "a brand new password");
+}
+
+#[actix_web::test]
+async fn admin_can_delete_an_asset_and_free_the_upload_slot() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let mut ids = Vec::new();
+    for _ in 0..MAX_UPLOADS_PER_USER {
+        ids.push(upload_text!(&app));
+    }
+    let blocked = test::call_service(&app, upload_request("text/plain", "x").to_request()).await;
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let list: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/assets", &cookie).to_request())
+            .await;
+    assert_eq!(list.as_array().unwrap().len(), MAX_UPLOADS_PER_USER);
+    assert_eq!(list[0]["uploader_ip"], "192.0.2.1");
+
+    let delete = TestRequest::delete()
+        .uri(&format!("/api/admin/assets/{}", ids[0]))
+        .cookie(cookie.clone());
+    let response = test::call_service(&app, delete.to_request()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let content = TestRequest::get().uri(&format!("/api/content/{}", ids[0]));
+    let response = test::call_service(&app, content.to_request()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = test::call_service(&app, upload_request("text/plain", "x").to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn admin_stats_group_active_uploads_by_ip() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let _ = upload_text!(&app);
+    let _ = upload_text!(&app);
+
+    let stats: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/stats", &cookie).to_request())
+            .await;
+    assert_eq!(stats["active_assets"], 2);
+    assert_eq!(stats["max_uploads_per_ip"], MAX_UPLOADS_PER_USER);
+    assert_eq!(stats["uploaders"][0]["ip"], "192.0.2.1");
+    assert_eq!(stats["uploaders"][0]["active_assets"], 2);
+    assert_eq!(stats["uploaders"][0]["bytes"], 2 * "hello".len());
+}
+
+#[actix_web::test]
+async fn credentials_survive_a_restart_and_a_corrupt_file_is_rejected() {
+    let path = temp_dir().join("admin/credentials.json");
+    let store = CredentialStore::load(path.clone()).await.unwrap();
+    store.setup(ADMIN_USER, ADMIN_PASSWORD).await.unwrap();
+
+    let reloaded = CredentialStore::load(path.clone()).await.unwrap();
+    assert!(reloaded.is_configured().await);
+    assert!(reloaded.verify(ADMIN_USER, ADMIN_PASSWORD).await.is_ok());
+
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(!contents.contains(ADMIN_PASSWORD));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    // A broken file must stop startup, not reopen the first-login setup.
+    fs::write(&path, b"not json").unwrap();
+    assert!(CredentialStore::load(path).await.is_err());
+}
+
+#[actix_web::test]
+async fn session_key_is_created_once_and_reused() {
+    let path = temp_dir().join("admin/session.key");
+    let first = load_or_create_session_key(&path).await.unwrap();
+    let second = load_or_create_session_key(&path).await.unwrap();
+    assert_eq!(first.master(), second.master());
 }

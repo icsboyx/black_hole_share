@@ -34,7 +34,8 @@ impl LogStats {
             LogEventType::HttpRequest(_) => self.total_requests += 1,
             LogEventType::AssetUploaded(_) => self.total_uploads += 1,
             LogEventType::AssetDeleted(_) => self.total_deleted += 1,
-            LogEventType::Error(_) => return,
+            // Admin actions stay out of the public stats.
+            LogEventType::Error(_) | LogEventType::Admin(_) => return,
         }
         if !matches!(log_event.event, LogEventType::HttpRequest(_)) {
             self.recent_activity.push_back(log_event.clone());
@@ -206,6 +207,7 @@ pub enum LogEventType {
     AssetDeleted(Value),
     HttpRequest(LogHttpRequest),
     Error(Value),
+    Admin(Value),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

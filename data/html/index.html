@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Image Upload</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="/nav.js" defer></script>
   <link rel="icon" href="/favicon.ico" sizes="any">
   <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
   <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
@@ -15,48 +16,52 @@
 </head>
 
 <body>
-  <h1><a href="/" class="home-link">Black Hole Share</a></h1>
+  <main class="page-scroll">
+    <div class="page-column">
+      <h1><a href="/" class="home-link">Black Hole Share</a></h1>
 
-  <div class="upload-container">
-    <div class="upload-area">
-      <input type="file" id="fileInput" accept="image/*" style="display: none" />
-      <div id="uploadZone" class="upload-zone">
-        <p>Click to select file, paste image, text data, or drag & drop</p>
+      <div class="upload-container">
+        <div class="upload-area">
+          <input type="file" id="fileInput" accept="image/*" style="display: none" />
+          <div id="uploadZone" class="upload-zone">
+            <p>Click to select file, paste image, text data, or drag & drop</p>
+          </div>
+        </div>
       </div>
-    </div>
-  </div>
-  <div id="uploadError" class="upload-error" style="display: none" role="status" aria-live="polite"></div>
+      <div id="uploadError" class="upload-error" style="display: none" role="status" aria-live="polite"></div>
 
-  <div class="duration-container">
-    <label for="durationSlider">Duration: <span id="durationValue">5</span> min</label>
-    <input type="range" id="durationSlider" min="1" max="60" value="5" step="1" />
-    <div class="button-row">
-      <button id="resetBtn" class="reset-btn" style="display: none">
-        Reset
-      </button>
-      <button id="uploadBtn" class="upload-btn" style="display: none">
-        Upload
-      </button>
-    </div>
-    <div id="linkContainer" class="link-container" style="display: none">
-      <p>Link:</p>
-      <a id="uploadedLink" href="#" target="_blank"></a>
-      <p id="clipboardMessage" class="clipboard-message" style="display: none"></p>
-    </div>
-  </div>
+      <div class="duration-container">
+        <label for="durationSlider">Duration: <span id="durationValue">5</span> min</label>
+        <input type="range" id="durationSlider" min="1" max="60" value="5" step="1" />
+        <div class="button-row">
+          <button id="resetBtn" class="reset-btn" style="display: none">
+            Reset
+          </button>
+          <button id="uploadBtn" class="upload-btn" style="display: none">
+            Upload
+          </button>
+        </div>
+        <div id="linkContainer" class="link-container" style="display: none">
+          <p>Link:</p>
+          <a id="uploadedLink" href="#" target="_blank"></a>
+          <p id="clipboardMessage" class="clipboard-message" style="display: none"></p>
+        </div>
+      </div>
 
-  <section class="intro-panel" aria-label="Sharing details">
-    <p class="intro-kicker">Temporary by design</p>
-    <p class="intro-copy">
-      Everything shared here is ephemeral. Files and text stay available only for the duration you
-      choose, then they are automatically deleted.
-    </p>
-    <div class="intro-chips" aria-hidden="true">
-      <span class="intro-chip">Selectable TTL: 1-60 min</span>
-      <span class="intro-chip">Auto-delete after expiry</span>
-      <span class="intro-chip">In-memory only</span>
+      <section class="intro-panel" aria-label="Sharing details">
+        <p class="intro-kicker">Temporary by design</p>
+        <p class="intro-copy">
+          Everything shared here is ephemeral. Files and text stay available only for the duration you
+          choose, then they are automatically deleted.
+        </p>
+        <div class="intro-chips" aria-hidden="true">
+          <span class="intro-chip">Selectable TTL: 1-60 min</span>
+          <span class="intro-chip">Auto-delete after expiry</span>
+          <span class="intro-chip">In-memory only</span>
+        </div>
+      </section>
     </div>
-  </section>
+  </main>
 
   {{FOOTER}}
 

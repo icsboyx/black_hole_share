@@ -18,6 +18,7 @@ Black Hole Share is a lightweight temporary sharing service built with Rust and 
 - Upload type allowlist, sandboxed content delivery, and security headers on every response
 - Request and lifecycle logging with automatic rotation and bounded retention
 - Stats page showing active assets, storage usage, and recent activity
+- Admin control panel at `/admin` to list and delete active assets and see uploads per IP
 
 ## Block Diagram
 
@@ -48,6 +49,7 @@ flowchart LR
 - Static web files and logs are read from `data/`.
 - `data/logs/` is created at startup if it is missing.
 - Logs are rotated on startup and whenever `log.txt` reaches 50 MB.
+- Admin credentials and the session key are stored in `data/admin/` and survive restarts.
 
 ## Limits
 
@@ -69,9 +71,12 @@ The per-IP limit is released as that client's shared items expire. Image uploads
 | `src/api.rs` | Upload, content, and stats API |
 | `src/data_mgt.rs` | In-memory asset store, cleanup, rate limiting |
 | `src/logs.rs` | JSON line logging, log rotation, and in-memory stats counters |
+| `src/admin.rs` | Admin panel API and session handling |
+| `src/auth.rs` | Admin credentials (Argon2id hash) and session key storage |
 | `src/tests.rs` | Automated tests |
 | `data/html/` | Static frontend pages and web assets |
 | `data/logs/` | Runtime log output |
+| `data/admin/` | Admin credentials and session key, created at runtime, never commit it |
 
 ## Run Locally
 
@@ -124,6 +129,7 @@ Then open:
 | `BIND_ADDR` | `0.0.0.0` | Address the HTTP server binds to |
 | `BIND_PORT` | `8080` | Port the HTTP server binds to |
 | `TRUSTED_PROXIES` | empty | Comma-separated proxy IPs allowed to report the client address via `X-Forwarded-For` |
+| `ADMIN_COOKIE_SECURE` | `true` | `false` lets the admin session cookie work over plain HTTP; any other value stops startup |
 
 ## Reverse Proxy
 
@@ -169,6 +175,7 @@ bhs.example.com {
 | `GET` | `/` | Upload page |
 | `GET` | `/bhs/{id}` | View a shared asset |
 | `GET` | `/stats` | Statistics dashboard |
+| `GET` | `/admin` | Admin control panel (login required) |
 
 Unknown paths return the error page with status `404`.
 
@@ -243,13 +250,56 @@ Logged event types:
 - asset uploads
 - asset deletions
 - error events
+- admin actions: setup, login, failed login, logout, password change, asset deletion
 
 On startup, an existing log file is renamed with a UTC timestamp before a new `log.txt` is created. The same rotation happens while running when `log.txt` reaches 50 MB. Only the 10 most recent rotated logs are kept; older ones are deleted.
+
+## Admin Panel
+
+Open `/admin`. Uploading, viewing, and the public stats stay open to everyone; only the panel requires a login.
+
+### First login
+
+While no admin account exists, `/admin` shows a form that creates it, and the server prints `Admin credentials not set` at startup. **Whoever opens `/admin` first becomes the admin**, so create the account right after the first start, before exposing the service.
+
+There is a single admin account. Its credentials are stored in `data/admin/credentials.json` (username and an Argon2id password hash, file mode `0600`). To reset them, stop the server, delete that file, and start again: the setup form appears again. A credentials file that cannot be read stops startup instead of reopening the setup.
+
+### Sessions
+
+- Login sets the `bhs_admin` cookie: encrypted with the key in `data/admin/session.key`, `HttpOnly`, `SameSite=Strict`, limited to `/api/admin`, and `Secure` unless `ADMIN_COOKIE_SECURE=false`.
+- A session lasts at most 8 hours.
+- Logging out or changing the password ends every admin session, on every device.
+- Browsers accept `Secure` cookies on `http://localhost` and `http://127.0.0.1`. For any other plain-HTTP address the login cannot work unless you set `ADMIN_COOKIE_SECURE=false`; prefer HTTPS through a reverse proxy instead.
+
+### Features
+
+- Usage cards: active assets, storage, totals since startup
+- Active uploads grouped by uploader IP
+- Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
+- Password change
+
+### Admin API
+
+All routes are under `/api/admin`, take and return JSON, and are never cached.
+
+| Method | Path | Login | Description |
+| --- | --- | --- | --- |
+| `GET` | `/status` | no | `configured`, `authenticated`, `username` |
+| `POST` | `/setup` | no | `{ "username", "password" }`; only while no account exists, otherwise `409` |
+| `POST` | `/login` | no | `{ "username", "password" }`; `401` on wrong credentials |
+| `POST` | `/logout` | yes | Ends every admin session |
+| `POST` | `/password` | yes | `{ "current_password", "new_password" }`; `403` if the current password is wrong |
+| `GET` | `/assets` | yes | Active assets |
+| `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
+| `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
+
+Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.
 
 ## Notes
 
 - This service is designed for short-lived sharing, not durable storage.
-- There is currently no persistent asset backend and no authentication layer.
+- There is currently no persistent asset backend.
+- Failed admin logins are logged but not rate limited.
 - The repository includes frontend assets under `data/html/`; if those files are missing, the web UI will not render correctly.
 
 ## Development
