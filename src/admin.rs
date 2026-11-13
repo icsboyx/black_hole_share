@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::{
     auth::AuthError,
     data_mgt::{AppState, log_removed_assets},
+    files::{FileError, NewFile, SharedFile},
     logs::{LogEventType, LogLimits},
     settings::{FieldError, Settings, UpdateError},
 };
@@ -75,7 +76,10 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
             .service(delete_asset)
             .service(stats)
             .service(get_settings)
-            .service(update_settings),
+            .service(update_settings)
+            .service(upload_file)
+            .service(list_files)
+            .service(delete_file),
     );
 }
 
@@ -295,6 +299,7 @@ async fn stats(
     let assets = app_state.assets.active_list().await;
     let log_stats = app_state.log_file.stats().await;
     let settings = app_state.settings.get();
+    let (file_count, file_bytes) = app_state.files.usage().await;
 
     let mut by_ip: HashMap<String, UploaderStats> = HashMap::new();
     for asset in &assets {
@@ -315,11 +320,145 @@ async fn stats(
         "max_assets": settings.max_assets,
         "max_storage_bytes": settings.max_total_storage_bytes,
         "max_uploads_per_ip": settings.max_uploads_per_ip,
+        "files": file_count,
+        "files_bytes": file_bytes,
+        "max_files_bytes": settings.max_files_total_bytes,
         "total_uploads": log_stats.total_uploads,
         "total_deleted": log_stats.total_deleted,
         "total_requests": log_stats.total_requests,
         "uploaders": uploaders,
     })))
+}
+
+#[derive(Deserialize)]
+struct FileUploadQuery {
+    name: String,
+    duration_minutes: u32,
+    max_downloads: Option<u32>,
+    /// Unix time in milliseconds.
+    valid_from: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AdminFileItem {
+    #[serde(flatten)]
+    file: SharedFile,
+    link: String,
+}
+
+impl From<SharedFile> for AdminFileItem {
+    fn from(file: SharedFile) -> Self {
+        let link = format!("/f/{}", file.id);
+        Self { file, link }
+    }
+}
+
+/// Upload of one file: the raw bytes are the body, the details are in the query string.
+/// Content-Length is required, so the disk space can be reserved before writing.
+#[post("/files")]
+async fn upload_file(
+    req: HttpRequest,
+    session: Session,
+    payload: web::Payload,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let query = match web::Query::<FileUploadQuery>::from_query(req.query_string()) {
+        Ok(query) => query.into_inner(),
+        Err(e) => {
+            return Ok(HttpResponse::BadRequest().json(json!({ "error": format!("{e}") })));
+        }
+    };
+    let Some(length) = req
+        .headers()
+        .get(actix_web::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return Ok(
+            HttpResponse::LengthRequired().json(json!({ "error": "Content-Length is required" }))
+        );
+    };
+
+    let settings = app_state.settings.get();
+    let new = NewFile {
+        name: query.name,
+        duration_minutes: query.duration_minutes,
+        valid_from: query.valid_from,
+        max_downloads: query.max_downloads,
+    };
+    match app_state.files.add(new, length, payload, &settings).await {
+        Ok(file) => {
+            log_admin(
+                &app_state,
+                &req,
+                "file_uploaded",
+                json!({ "username": username, "file_id": file.id, "name": file.name, "size": file.size }),
+            )
+            .await;
+            Ok(HttpResponse::Created().json(AdminFileItem::from(file)))
+        }
+        Err(FileError::InvalidInput(message)) => {
+            Ok(HttpResponse::BadRequest().json(json!({ "error": message })))
+        }
+        Err(FileError::TooLarge) => Ok(HttpResponse::PayloadTooLarge().json(json!({
+            "error": format!("File is larger than {} bytes", settings.max_file_size_bytes)
+        }))),
+        Err(FileError::StorageFull) => Ok(HttpResponse::InsufficientStorage()
+            .json(json!({ "error": "Not enough space left in the file storage budget" }))),
+        Err(FileError::LengthMismatch) => Ok(HttpResponse::BadRequest()
+            .json(json!({ "error": "The body does not match its Content-Length" }))),
+        Err(FileError::Internal(e)) => {
+            eprintln!("File upload failed: {e:#}");
+            Ok(HttpResponse::InternalServerError().json(json!({ "error": "Upload failed" })))
+        }
+    }
+}
+
+#[get("/files")]
+async fn list_files(
+    session: Session,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    require_admin(&session, &app_state).await?;
+    let items: Vec<AdminFileItem> = app_state
+        .files
+        .list()
+        .await
+        .into_iter()
+        .map(AdminFileItem::from)
+        .collect();
+    Ok(HttpResponse::Ok().json(items))
+}
+
+#[delete("/files/{id}")]
+async fn delete_file(
+    req: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    match app_state.files.remove(&id).await {
+        Ok(Some(file)) => {
+            log_admin(
+                &app_state,
+                &req,
+                "file_deleted",
+                json!({ "username": username, "file_id": file.id, "name": file.name }),
+            )
+            .await;
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Ok(None) => Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" }))),
+        Err(e) => {
+            eprintln!("Cannot delete file {id}: {e:#}");
+            Ok(HttpResponse::InternalServerError().json(json!({ "error": "Delete failed" })))
+        }
+    }
 }
 
 #[get("/settings")]

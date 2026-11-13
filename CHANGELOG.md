@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Settings stored in `data/admin/settings.json` and edited from the admin panel: upload limits, log limits, trusted proxies, session lifetime, bind address and port. Limits apply immediately; bind address, port, and session lifetime after a restart. Every change is logged.
 - `GET /api/limits` returns the upload limits; the upload page builds its duration slider from them.
 - Admin panel tabs (Overview, Settings, Account); settings are split into sections per type, each saved on its own, with "Restore defaults".
-- File sharing limits in the settings (max file size, total disk space, max duration), used by the upcoming file sharing.
+- File sharing for the admin: any file type stored on disk in `data/storage/`, shared through `/f/{id}` with an expiry, an optional download limit, and an optional opening time. Uploads stream to disk with progress; downloads are always whole-file attachments and each one is counted. Files survive restarts; orphaned or partial files are cleaned up at startup.
+- File sharing limits in the settings: max file size, total disk space, max duration.
+- "Files" tab in the admin panel and a "Files" link in the admin bar.
 
 ### Changed
 

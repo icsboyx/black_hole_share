@@ -20,6 +20,7 @@ use crate::{
     auth::{CredentialStore, load_or_create_session_key},
     configure_routes,
     data_mgt::{AppState, Asset, AssetStorage, RateLimiter},
+    files::{FileError, FileStore, NewFile, clean_file_name},
     logs::{LogEventType, LogFile, LogLimits},
     resolve_client_ip, security_headers,
     settings::{Settings, SettingsStore},
@@ -48,6 +49,7 @@ async fn state_in(dir: &std::path::Path) -> AppState {
             .await
             .unwrap(),
         settings: SettingsStore::with_values(dir.join("admin/settings.json"), defaults()),
+        files: FileStore::load(dir.join("storage")).await.unwrap(),
     }
 }
 
@@ -356,6 +358,9 @@ async fn admin_routes_require_login() {
         TestRequest::delete().uri(&format!("/api/admin/assets/{}", uuid::Uuid::new_v4())),
         admin_post("/api/admin/password", change),
         TestRequest::get().uri("/api/admin/settings"),
+        TestRequest::get().uri("/api/admin/files"),
+        TestRequest::post().uri("/api/admin/files?name=a.txt&duration_minutes=5").set_payload("x"),
+        TestRequest::delete().uri(&format!("/api/admin/files/{}", uuid::Uuid::new_v4())),
         TestRequest::put().uri("/api/admin/settings").set_json(json!(defaults())),
     ];
     for request in requests {
@@ -833,4 +838,273 @@ async fn lower_recent_activity_limit_trims_the_list() {
     })
     .await;
     assert_eq!(log.stats().await.recent_activity.len(), 2);
+}
+
+// ---------------------------------------------------------------- shared files
+
+fn file_upload(cookie: &Cookie<'static>, query: &str, body: &'static [u8]) -> TestRequest {
+    TestRequest::post()
+        .uri(&format!("/api/admin/files?{query}"))
+        .peer_addr(peer("192.0.2.50"))
+        .cookie(cookie.clone())
+        .set_payload(body)
+}
+
+fn new_file(name: &str) -> NewFile {
+    NewFile { name: name.into(), duration_minutes: 5, valid_from: None, max_downloads: None }
+}
+
+fn chunks(
+    parts: &[&'static [u8]],
+) -> impl futures::Stream<Item = Result<actix_web::web::Bytes, std::io::Error>> + Unpin {
+    futures::stream::iter(
+        parts.iter().map(|part| Ok(actix_web::web::Bytes::from_static(part))).collect::<Vec<_>>(),
+    )
+}
+
+fn storage_names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[actix_web::test]
+async fn admin_uploads_a_file_and_anyone_downloads_it_as_an_attachment() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+
+    let response = test::call_service(
+        &app,
+        file_upload(&cookie, "name=report.pdf&duration_minutes=5", b"%PDF-1.7 hello").to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: Value = test::read_body_json(response).await;
+    assert_eq!(created["name"], "report.pdf");
+    assert_eq!(created["size"], 14);
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["link"], format!("/f/{id}"));
+
+    let info: Value = test::call_and_read_body_json(
+        &app,
+        TestRequest::get().uri(&format!("/api/files/{id}/info")).to_request(),
+    )
+    .await;
+    assert_eq!(info["available"], true);
+    assert_eq!(info["downloads_left"], Value::Null);
+
+    // A Range header is ignored: the whole file is sent and counted.
+    let download = TestRequest::get()
+        .uri(&format!("/api/files/{id}"))
+        .insert_header((header::RANGE, "bytes=0-3"))
+        .to_request();
+    let response = test::call_service(&app, download).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(headers.get(header::CONTENT_TYPE).unwrap(), "application/octet-stream");
+    assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), "14");
+    assert_eq!(headers.get("content-security-policy").unwrap(), CONTENT_CSP);
+    assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+    let disposition = headers.get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap();
+    assert!(disposition.starts_with("attachment;"), "{disposition}");
+    assert!(disposition.contains(r#"filename="report.pdf""#), "{disposition}");
+    assert!(headers.get(header::CONTENT_RANGE).is_none());
+    assert_eq!(test::read_body(response).await.as_ref(), b"%PDF-1.7 hello");
+
+    let list: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/files", &cookie).to_request()).await;
+    assert_eq!(list[0]["downloads"], 1);
+}
+
+#[actix_web::test]
+async fn non_ascii_file_name_gets_an_ascii_fallback_and_a_utf8_name() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let response = test::call_service(
+        &app,
+        file_upload(&cookie, "name=caf%C3%A9%20%22x%22.txt&duration_minutes=5", b"x").to_request(),
+    )
+    .await;
+    let created: Value = test::read_body_json(response).await;
+    assert_eq!(created["name"], "café \"x\".txt");
+
+    let request = TestRequest::get().uri(&format!("/api/files/{}", created["id"].as_str().unwrap()));
+    let response = test::call_service(&app, request.to_request()).await;
+    let disposition = response.headers().get(header::CONTENT_DISPOSITION).unwrap().as_bytes();
+    let disposition = String::from_utf8_lossy(disposition);
+    assert!(disposition.contains(r#"filename="caf_ _x_.txt""#), "{disposition}");
+    assert!(disposition.contains("filename*=UTF-8''caf%C3%A9%20%22x%22.txt"), "{disposition}");
+}
+
+#[actix_web::test]
+async fn file_is_deleted_after_its_last_allowed_download() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let response = test::call_service(
+        &app,
+        file_upload(&cookie, "name=once.bin&duration_minutes=5&max_downloads=1", b"secret").to_request(),
+    )
+    .await;
+    let created: Value = test::read_body_json(response).await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let first = test::call_service(&app, TestRequest::get().uri(&format!("/api/files/{id}")).to_request()).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    // Content stays readable for the download in progress even though it is unlinked.
+    assert_eq!(test::read_body(first).await.as_ref(), b"secret");
+
+    let second = test::call_service(&app, TestRequest::get().uri(&format!("/api/files/{id}")).to_request()).await;
+    assert_eq!(second.status(), StatusCode::NOT_FOUND);
+    assert_eq!(storage_names(&dir.join("storage")), ["index.json"]);
+    let index = fs::read_to_string(dir.join("storage/index.json")).unwrap();
+    assert!(!index.contains(&id), "{index}");
+}
+
+#[actix_web::test]
+async fn file_is_not_downloadable_before_valid_from() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let later = chrono::Utc::now().timestamp_millis() + 60 * 60 * 1000;
+    let query = format!("name=later.txt&duration_minutes=5&valid_from={later}");
+    let request = TestRequest::post()
+        .uri(&format!("/api/admin/files?{query}"))
+        .cookie(cookie.clone())
+        .set_payload("soon");
+    let created: Value = test::call_and_read_body_json(&app, request.to_request()).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    // The duration counts from valid_from.
+    assert_eq!(created["expires_at"], later + 5 * 60 * 1000);
+
+    let info: Value = test::call_and_read_body_json(
+        &app,
+        TestRequest::get().uri(&format!("/api/files/{id}/info")).to_request(),
+    )
+    .await;
+    assert_eq!(info["available"], false);
+    assert_eq!(info["valid_from"], later);
+
+    let response = test::call_service(&app, TestRequest::get().uri(&format!("/api/files/{id}")).to_request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+async fn file_upload_limits_follow_the_settings() {
+    let state = test_state().await;
+    let app = test_app!(state.clone());
+    let cookie = admin_setup!(&app);
+    let limits = Settings { max_file_size_bytes: 4, max_files_total_bytes: 6, max_file_duration_minutes: 10, ..defaults() };
+    state.settings.update(limits).await.unwrap();
+
+    let cases: [(&str, &'static [u8], StatusCode); 5] = [
+        ("name=a&duration_minutes=5", b"12345", StatusCode::PAYLOAD_TOO_LARGE),
+        ("name=a&duration_minutes=11", b"1", StatusCode::BAD_REQUEST),
+        ("name=a&duration_minutes=5&max_downloads=0", b"1", StatusCode::BAD_REQUEST),
+        ("name=..&duration_minutes=5", b"1", StatusCode::BAD_REQUEST),
+        ("duration_minutes=5", b"1", StatusCode::BAD_REQUEST),
+    ];
+    for (query, body, expected) in cases {
+        let response = test::call_service(&app, file_upload(&cookie, query, body).to_request()).await;
+        assert_eq!(response.status(), expected, "{query}");
+    }
+
+    let ok = test::call_service(&app, file_upload(&cookie, "name=a&duration_minutes=5", b"1234").to_request()).await;
+    assert_eq!(ok.status(), StatusCode::CREATED);
+    let full = test::call_service(&app, file_upload(&cookie, "name=b&duration_minutes=5", b"123").to_request()).await;
+    assert_eq!(full.status(), StatusCode::INSUFFICIENT_STORAGE);
+}
+
+#[actix_web::test]
+async fn failed_upload_leaves_no_partial_file_and_frees_the_space() {
+    let dir = temp_dir();
+    let store = FileStore::load(&dir).await.unwrap();
+    let settings = Settings { max_file_size_bytes: 10, max_files_total_bytes: 10, ..defaults() };
+
+    let short: &[&'static [u8]] = &[b"short"];
+    let long: &[&'static [u8]] = &[b"too", b" long"];
+    for (length, parts) in [(10, short), (3, long)] {
+        let result = store.add(new_file("x"), length, chunks(parts), &settings).await;
+        assert!(matches!(result, Err(FileError::LengthMismatch)), "{result:?}");
+        assert!(storage_names(&dir).is_empty(), "{:?}", storage_names(&dir));
+    }
+    // The space reserved by the failed uploads was given back.
+    let file = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &settings).await.unwrap();
+    assert_eq!(file.size, 10);
+}
+
+#[actix_web::test]
+async fn files_survive_a_restart_and_storage_is_reconciled() {
+    let dir = temp_dir();
+    let store = FileStore::load(&dir).await.unwrap();
+    let kept = store.add(new_file("keep.txt"), 4, chunks(&[b"keep"]), &defaults()).await.unwrap();
+    let lost = store.add(new_file("lost.txt"), 4, chunks(&[b"lost"]), &defaults()).await.unwrap();
+
+    fs::remove_file(dir.join(lost.id.to_string())).unwrap();
+    let orphan = uuid::Uuid::new_v4();
+    fs::write(dir.join(orphan.to_string()), b"orphan").unwrap();
+    fs::write(dir.join(format!("{}.part", uuid::Uuid::new_v4())), b"partial").unwrap();
+    fs::write(dir.join("notes.txt"), b"not ours").unwrap();
+
+    let reloaded = FileStore::load(&dir).await.unwrap();
+    assert_eq!(reloaded.list().await, std::slice::from_ref(&kept));
+    let mut expected = vec!["index.json".to_string(), "notes.txt".to_string(), kept.id.to_string()];
+    expected.sort();
+    assert_eq!(storage_names(&dir), expected);
+
+    fs::write(dir.join("index.json"), b"not json").unwrap();
+    assert!(FileStore::load(&dir).await.is_err());
+}
+
+#[actix_web::test]
+async fn expired_files_are_deleted_from_disk() {
+    let dir = temp_dir();
+    let store = FileStore::load(&dir).await.unwrap();
+    let file = store.add(new_file("old.txt"), 3, chunks(&[b"old"]), &defaults()).await.unwrap();
+    assert!(store.remove_expired().await.unwrap().is_empty());
+
+    // Rewrite the index with an expiry in the past, as if time had passed.
+    let mut expired = file.clone();
+    expired.expires_at = chrono::Utc::now().timestamp_millis() - 1;
+    fs::write(dir.join("index.json"), serde_json::to_vec(&[expired]).unwrap()).unwrap();
+    let store = FileStore::load(&dir).await.unwrap();
+
+    let removed = store.remove_expired().await.unwrap();
+    assert_eq!(removed.len(), 1);
+    assert_eq!(storage_names(&dir), ["index.json"]);
+}
+
+#[actix_web::test]
+async fn admin_can_delete_a_shared_file() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let created: Value = test::call_and_read_body_json(
+        &app,
+        file_upload(&cookie, "name=a.txt&duration_minutes=5", b"abc").to_request(),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let delete = TestRequest::delete().uri(&format!("/api/admin/files/{id}")).cookie(cookie.clone());
+    assert_eq!(test::call_service(&app, delete.to_request()).await.status(), StatusCode::NO_CONTENT);
+    let response = test::call_service(&app, TestRequest::get().uri(&format!("/api/files/{id}")).to_request()).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(storage_names(&dir.join("storage")), ["index.json"]);
+
+    let stats: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/stats", &cookie).to_request()).await;
+    assert_eq!(stats["files"], 0);
+}
+
+#[actix_web::test]
+async fn file_names_keep_only_the_last_path_component() {
+    assert_eq!(clean_file_name("../../etc/passwd").as_deref(), Some("passwd"));
+    assert_eq!(clean_file_name(r"C:\Users\me\photo.jpg").as_deref(), Some("photo.jpg"));
+    assert_eq!(clean_file_name("  report.pdf ").as_deref(), Some("report.pdf"));
+    for bad in ["", "dir/", "..", "a\nb", &"x".repeat(256)] {
+        assert_eq!(clean_file_name(bad), None, "{bad:?}");
+    }
 }

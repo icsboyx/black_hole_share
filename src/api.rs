@@ -8,6 +8,7 @@ use serde_json::json;
 use crate::{ALLOWED_CONTENT_TYPES, CONTENT_CSP};
 use crate::{
     data_mgt::{AppState, Asset},
+    files::Download,
     logs::LogEventType,
 };
 
@@ -246,7 +247,10 @@ async fn api_stats(app_state: web::Data<AppState>) -> Result<HttpResponse, actix
             let (action, asset) = match line.event {
                 LogEventType::AssetUploaded(asset) => ("upload", asset),
                 LogEventType::AssetDeleted(asset) => ("delete", asset),
-                LogEventType::HttpRequest(_) | LogEventType::Error(_) | LogEventType::Admin(_) => {
+                LogEventType::HttpRequest(_)
+                | LogEventType::Error(_)
+                | LogEventType::Admin(_)
+                | LogEventType::File(_) => {
                     return None;
                 }
             };
@@ -272,4 +276,126 @@ async fn api_stats(app_state: web::Data<AppState>) -> Result<HttpResponse, actix
     };
 
     Ok(HttpResponse::Ok().json(response))
+}
+
+/// Public facts about a shared file, for its download page.
+#[get("/api/files/{id}/info")]
+async fn api_file_info(
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let Ok(id) = uuid::Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    let Some(file) = app_state.files.get(&id).await else {
+        return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
+    };
+    let now = chrono::Utc::now().timestamp_millis();
+    Ok(HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .json(json!({
+            "name": file.name,
+            "size": file.size,
+            "expires_at": file.expires_at,
+            "valid_from": file.valid_from,
+            "available": file.is_available(now),
+            "downloads_left": file.downloads_left(),
+        })))
+}
+
+/// Sends the whole file as an attachment. Range requests are not supported on purpose:
+/// every GET is one counted download, so a download limit cannot be bypassed in pieces.
+#[get("/api/files/{id}")]
+async fn api_file_download(
+    req: HttpRequest,
+    path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    app_state
+        .log_file
+        .write_event(LogEventType::HttpRequest(req.clone().into()))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
+
+    let Ok(id) = uuid::Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    let download = app_state.files.start_download(&id).await.map_err(|e| {
+        eprintln!("Cannot start download of {id}: {e:#}");
+        actix_web::error::ErrorInternalServerError("Cannot read the file")
+    })?;
+    let (file, handle) = match download {
+        Download::NotFound => {
+            return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
+        }
+        Download::NotYetAvailable { valid_from } => {
+            return Ok(HttpResponse::Forbidden()
+                .json(json!({ "error": "File not available yet", "valid_from": valid_from })));
+        }
+        Download::Ready { file, handle } => (file, handle),
+    };
+
+    let event = json!({
+        "action": "downloaded",
+        "id": file.id,
+        "name": file.name,
+        "downloads": file.downloads,
+        "max_downloads": file.max_downloads,
+        "ip": crate::client_ip(&req).unwrap_or_else(|| "-".to_string()),
+    });
+    app_state
+        .log_file
+        .write_event(LogEventType::File(event))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log file download: {}", e));
+
+    Ok(HttpResponse::Ok()
+        .content_type(mime::APPLICATION_OCTET_STREAM)
+        .insert_header(attachment_header(&file.name))
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header(("Content-Security-Policy", CONTENT_CSP))
+        .no_chunking(file.size)
+        .streaming(file_chunks(handle)))
+}
+
+/// `attachment` with an ASCII fallback name plus the exact UTF-8 name (RFC 6266), so every
+/// browser saves the file instead of showing it, under a sensible name.
+fn attachment_header(name: &str) -> header::ContentDisposition {
+    let ascii: String =
+        name.chars()
+            .map(|c| {
+                if c.is_ascii() && !c.is_ascii_control() && c != '"' && c != '\\' { c } else { '_' }
+            })
+            .collect();
+    header::ContentDisposition {
+        disposition: header::DispositionType::Attachment,
+        parameters: vec![
+            header::DispositionParam::Filename(ascii),
+            header::DispositionParam::FilenameExt(header::ExtendedValue {
+                charset: header::Charset::Ext("UTF-8".to_string()),
+                language_tag: None,
+                value: name.as_bytes().to_vec(),
+            }),
+        ],
+    }
+}
+
+const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Reads the file in chunks. After a read error the stream ends, which aborts the response.
+fn file_chunks(
+    file: tokio::fs::File,
+) -> impl futures::Stream<Item = Result<web::Bytes, std::io::Error>> {
+    futures::stream::unfold(Some(file), |file| async move {
+        let mut file = file?;
+        let mut buffer = vec![0; DOWNLOAD_CHUNK_BYTES];
+        match tokio::io::AsyncReadExt::read(&mut file, &mut buffer).await {
+            Ok(0) => None,
+            Ok(read) => {
+                buffer.truncate(read);
+                Some((Ok(web::Bytes::from(buffer)), Some(file)))
+            }
+            Err(e) => Some((Err(e), None)),
+        }
+    })
 }

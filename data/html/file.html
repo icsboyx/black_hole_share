@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>Black Hole Share - Download</title>
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/nav.js" defer></script>
+  <style>
+    .file-card {
+      margin: 40px auto 0 auto;
+      width: 100%;
+      max-width: 520px;
+      background-color: var(--bg-secondary);
+      border: 1px solid rgba(51, 204, 255, 0.35);
+      border-radius: 16px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+      overflow: hidden;
+    }
+
+    .file-top {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 26px 26px 20px 26px;
+    }
+
+    .file-icon {
+      flex-shrink: 0;
+      width: 56px;
+      height: 64px;
+      border-radius: 8px;
+      background: linear-gradient(160deg, rgba(51, 204, 255, 0.25), rgba(0, 255, 153, 0.15));
+      border: 1px solid rgba(51, 204, 255, 0.5);
+      color: var(--accent-cyan);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75em;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      overflow: hidden;
+    }
+
+    .file-name {
+      color: var(--text-primary);
+      font-size: 1.1em;
+      font-weight: bold;
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .file-size {
+      color: var(--text-secondary);
+      font-size: 0.85em;
+      margin: 6px 0 0 0;
+    }
+
+    .file-facts {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px;
+      background-color: rgba(89, 89, 89, 0.5);
+      border-top: 1px solid rgba(89, 89, 89, 0.5);
+      border-bottom: 1px solid rgba(89, 89, 89, 0.5);
+    }
+
+    .fact {
+      background-color: var(--bg-secondary);
+      padding: 14px 26px;
+    }
+
+    .fact-label {
+      color: var(--text-secondary);
+      font-size: 0.7em;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    .fact-value {
+      color: var(--accent-cyan);
+      font-size: 0.95em;
+      margin-top: 4px;
+    }
+
+    .file-actions {
+      padding: 20px 26px 24px 26px;
+    }
+
+    .download-btn {
+      display: block;
+      width: 100%;
+      text-align: center;
+      text-decoration: none;
+      background-color: var(--accent-cyan);
+      color: var(--bg-tertiary);
+      border-radius: 10px;
+      font-weight: bold;
+      padding: 13px;
+      transition: background-color 0.2s ease, transform 0.1s ease;
+    }
+
+    .download-btn:hover {
+      background-color: var(--accent-green);
+    }
+
+    .download-btn:active {
+      transform: scale(0.99);
+    }
+
+    .download-btn[aria-disabled="true"] {
+      background-color: var(--inactive-gray);
+      color: var(--text-secondary);
+      pointer-events: none;
+    }
+
+    .file-note {
+      color: var(--text-secondary);
+      font-size: 0.8em;
+      margin: 12px 0 0 0;
+      text-align: center;
+    }
+
+    .file-missing {
+      padding: 40px 26px;
+      text-align: center;
+      color: var(--text-secondary);
+    }
+
+    .file-missing h2 {
+      color: var(--accent-cyan);
+      margin: 0 0 8px 0;
+      font-size: 1.1em;
+    }
+  </style>
+</head>
+
+<body class="view-page">
+  <main class="page-scroll">
+    <div class="page-column">
+      <h1><a href="/" class="home-link">Black Hole Share</a></h1>
+      <div id="fileCard" class="file-card">
+        <div class="file-missing">Loading...</div>
+      </div>
+    </div>
+  </main>
+
+  {{FOOTER}}
+
+  <script>
+    const fileId = window.location.pathname.split("/").pop();
+    const card = document.getElementById("fileCard");
+    let info = null;
+    // What the card currently shows, so the timer only rebuilds it when the state changes.
+    let shownWaiting = null;
+    let countdown = null;
+
+    // Builds DOM nodes; strings become text nodes, so the file name is never parsed as HTML.
+    function el(tag, props = {}, ...children) {
+      const node = document.createElement(tag);
+      Object.assign(node, props);
+      for (const child of children) {
+        node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+      }
+      return node;
+    }
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+      return `${parseFloat((bytes / Math.pow(1024, i)).toFixed(2))} ${units[i]}`;
+    }
+
+    function formatDuration(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const days = Math.floor(total / 86400);
+      const hours = Math.floor((total % 86400) / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      const seconds = total % 60;
+      if (days > 0) return `${days}d ${hours}h`;
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+    }
+
+    function formatDate(ms) {
+      return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    }
+
+    function extension(name) {
+      const dot = name.lastIndexOf(".");
+      return dot > 0 && name.length - dot <= 6 ? name.slice(dot + 1) : "file";
+    }
+
+    function showMissing(title, text) {
+      card.replaceChildren(el("div", { className: "file-missing" }, el("h2", {}, title), text));
+    }
+
+    function render() {
+      const now = Date.now();
+      if (now >= info.expires_at) {
+        showMissing("This link has expired", "The file is no longer available.");
+        return;
+      }
+      const waiting = info.valid_from !== null && now < info.valid_from;
+      shownWaiting = waiting;
+      const facts = [
+        waiting
+          ? ["Available in", formatDuration(info.valid_from - now)]
+          : ["Expires in", formatDuration(info.expires_at - now)],
+        ["Downloads left", info.downloads_left === null ? "Unlimited" : info.downloads_left],
+      ];
+
+      const button = el("a", { className: "download-btn", href: `/api/files/${encodeURIComponent(fileId)}` }, "Download");
+      button.setAttribute("download", "");
+      if (waiting) button.setAttribute("aria-disabled", "true");
+      // A limited file can disappear after this download: refresh the counter shortly after.
+      button.addEventListener("click", () => setTimeout(load, 1500));
+
+      const note = waiting
+        ? `Available from ${formatDate(info.valid_from)}.`
+        : `Available until ${formatDate(info.expires_at)}.`;
+
+      card.replaceChildren(
+        el(
+          "div",
+          { className: "file-top" },
+          el("div", { className: "file-icon" }, extension(info.name)),
+          el("div", {}, el("p", { className: "file-name" }, info.name), el("p", { className: "file-size" }, formatBytes(info.size)))
+        ),
+        el(
+          "div",
+          { className: "file-facts" },
+          ...facts.map(([label, value]) =>
+            el("div", { className: "fact" }, el("div", { className: "fact-label" }, label), el("div", { className: "fact-value" }, value))
+          )
+        ),
+        el("div", { className: "file-actions" }, button, el("p", { className: "file-note" }, note))
+      );
+      countdown = card.querySelector(".fact-value");
+    }
+
+    // Updates only the countdown text, so a click on the button is never lost to a rebuild.
+    function tick() {
+      if (!info) return;
+      const now = Date.now();
+      const waiting = info.valid_from !== null && now < info.valid_from;
+      if (now >= info.expires_at || waiting !== shownWaiting || !countdown) {
+        render();
+        return;
+      }
+      countdown.textContent = formatDuration((waiting ? info.valid_from : info.expires_at) - now);
+    }
+
+    async function load() {
+      try {
+        const response = await fetch(`/api/files/${encodeURIComponent(fileId)}/info`, { cache: "no-store" });
+        if (!response.ok) {
+          info = null;
+          countdown = null;
+          showMissing("File not found", "The link is wrong, the file has expired, or it reached its download limit.");
+          return;
+        }
+        info = await response.json();
+        render();
+      } catch {
+        showMissing("Cannot reach the server", "Try again in a moment.");
+      }
+    }
+
+    // Keeps the countdowns live; when a waiting file becomes available, the button turns on.
+    setInterval(tick, 1000);
+
+    load();
+  </script>
+</body>
+
+</html>

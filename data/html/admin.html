@@ -463,6 +463,105 @@
       opacity: 0.35;
     }
 
+    .dropzone {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin: 18px 22px 0 22px;
+      padding: 26px 16px;
+      border: 2px dashed rgba(51, 204, 255, 0.4);
+      border-radius: 12px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      text-align: center;
+      transition: border-color 0.2s ease, background-color 0.2s ease;
+    }
+
+    .dropzone:hover,
+    .dropzone.over {
+      border-color: var(--accent-cyan);
+      background-color: rgba(51, 204, 255, 0.06);
+    }
+
+    .dropzone strong {
+      color: var(--text-primary);
+      overflow-wrap: anywhere;
+    }
+
+    .dropzone small {
+      font-size: 0.75em;
+    }
+
+    .input-wrap select {
+      background: none;
+      border: none;
+      border-left: 1px solid rgba(89, 89, 89, 0.6);
+      color: var(--text-secondary);
+      font-family: inherit;
+      font-size: 0.8em;
+      padding: 0 8px;
+      outline: none;
+    }
+
+    .input-wrap select option {
+      background-color: var(--bg-primary);
+    }
+
+    .input-wrap input[type="datetime-local"] {
+      color-scheme: dark;
+    }
+
+    .progress {
+      height: 6px;
+      margin-top: 8px;
+      border-radius: 999px;
+      background-color: rgba(89, 89, 89, 0.5);
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0;
+      background: linear-gradient(90deg, var(--accent-cyan), var(--accent-green));
+      transition: width 0.2s ease;
+    }
+
+    .progress-text {
+      color: var(--text-secondary);
+      font-size: 0.75em;
+      margin-top: 6px;
+    }
+
+    #fileForm .settings-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .upload-progress {
+      padding: 0 22px;
+    }
+
+    .file-table {
+      padding: 10px 22px 18px 22px;
+    }
+
+    .file-table td.name {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .row-actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-ghost.danger:hover:not(:disabled) {
+      border-color: #ff6666;
+      color: #ff6666;
+    }
+
     @media (max-width: 900px) {
       .settings-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -537,6 +636,8 @@
         <div class="tabs" role="tablist">
           <button class="tab" type="button" role="tab" id="tabBtn-overview" aria-controls="tab-overview"
             data-tab="overview">Overview</button>
+          <button class="tab" type="button" role="tab" id="tabBtn-files" aria-controls="tab-files"
+            data-tab="files">Files</button>
           <button class="tab" type="button" role="tab" id="tabBtn-settings" aria-controls="tab-settings"
             data-tab="settings">Settings</button>
           <button class="tab" type="button" role="tab" id="tabBtn-account" aria-controls="tab-account"
@@ -560,6 +661,75 @@
             <h2>Active assets</h2>
             <p id="assetsMessage" class="message"></p>
             <div class="table-wrap" id="assetsTable"></div>
+          </div>
+        </div>
+
+        <div id="tab-files" role="tabpanel" aria-labelledby="tabBtn-files" hidden>
+          <form id="fileForm" class="settings-card" novalidate>
+            <div class="settings-head">
+              <div>
+                <h2>Share a file</h2>
+                <p id="fileLimits">Files are stored on disk and shared through a public link.</p>
+              </div>
+            </div>
+            <label class="dropzone" id="dropzone" for="fileInput">
+              <strong id="dropzoneTitle">Drop a file here or click to choose</strong>
+              <small id="dropzoneHint">Any file type</small>
+              <input id="fileInput" type="file" hidden />
+            </label>
+            <div class="settings-grid">
+              <div class="field" id="field-file-name">
+                <label class="field-label" for="fileName">Name</label>
+                <div class="input-wrap"><input id="fileName" type="text" maxlength="255" spellcheck="false" /></div>
+                <div class="field-help">Shown to the downloader</div>
+              </div>
+              <div class="field" id="field-file-duration">
+                <label class="field-label" for="fileDuration">Available for</label>
+                <div class="input-wrap">
+                  <input id="fileDuration" type="number" min="1" step="1" value="1" inputmode="numeric" />
+                  <select id="fileDurationUnit" aria-label="Duration unit">
+                    <option value="1">min</option>
+                    <option value="60">hours</option>
+                    <option value="1440" selected>days</option>
+                  </select>
+                </div>
+                <div class="field-help" id="fileDurationHelp">Counted from when the link opens</div>
+              </div>
+              <div class="field" id="field-file-downloads">
+                <label class="field-label" for="fileMaxDownloads">Max downloads</label>
+                <div class="input-wrap"><input id="fileMaxDownloads" type="number" min="1" step="1"
+                    placeholder="Unlimited" inputmode="numeric" /></div>
+                <div class="field-help">Deleted after the last one</div>
+              </div>
+              <div class="field" id="field-file-from">
+                <label class="field-label" for="fileValidFrom">Opens at</label>
+                <div class="input-wrap"><input id="fileValidFrom" type="datetime-local" /></div>
+                <div class="field-help">Empty: right away</div>
+              </div>
+            </div>
+            <div class="upload-progress" id="uploadProgress" hidden>
+              <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+              <div class="progress-text" id="progressText"></div>
+            </div>
+            <div class="settings-foot">
+              <p class="message" id="fileMessage"></p>
+              <div class="settings-actions">
+                <button class="btn-ghost" type="button" id="fileCancel" disabled>Cancel</button>
+                <button class="btn-primary" type="submit" id="fileUploadBtn" disabled>Upload</button>
+              </div>
+            </div>
+          </form>
+
+          <div class="settings-card">
+            <div class="settings-head">
+              <div>
+                <h2>Shared files</h2>
+                <p id="filesSummary">Files whose link is still valid.</p>
+              </div>
+              <div class="chips"><button class="btn-ghost" type="button" id="filesRefresh">Refresh</button></div>
+            </div>
+            <p class="message" id="filesMessage" style="padding: 0 22px"></p>
+            <div class="table-wrap file-table" id="filesTable"></div>
           </div>
         </div>
 
@@ -662,9 +832,19 @@
     function formatBytes(bytes) {
       if (bytes === 0) return "0 B";
       const k = 1024;
-      const sizes = ["B", "KB", "MB", "GB"];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      const sizes = ["B", "KB", "MB", "GB", "TB"];
+      const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
       return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    }
+
+    function formatDuration(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const days = Math.floor(total / 86400);
+      const hours = Math.floor((total % 86400) / 3600);
+      const minutes = Math.floor((total % 3600) / 60);
+      if (days > 0) return `${days}d ${hours}h`;
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      return `${minutes}m ${String(total % 60).padStart(2, "0")}s`;
     }
 
     function formatTime(millis) {
@@ -721,7 +901,9 @@
         show("dashboardView");
         selectTab(location.hash.slice(1));
         // Settings load once per login; the periodic refresh must not overwrite edits.
-        await Promise.all([loadDashboard(), loadSettings()]);
+        // Settings first: the Files tab shows limits taken from them.
+        await loadSettings();
+        await loadDashboard();
       }
     }
 
@@ -739,13 +921,228 @@
       renderStats(stats.data);
       renderUploaders(stats.data.uploaders);
       renderAssets(assets.data);
+      renderFileLimits(stats.data);
+      await loadFiles();
     }
+
+    // ------------------------------------------------------------------ shared files
+
+    let selectedFile = null;
+    let uploadRequest = null;
+
+    function fileLink(item) {
+      return `${location.origin}${item.link}`;
+    }
+
+    async function copyLink(url) {
+      try {
+        await navigator.clipboard.writeText(url);
+        setMessage("filesMessage", "Link copied.", "ok");
+      } catch {
+        // The clipboard API needs HTTPS or localhost; let the admin copy it by hand.
+        window.prompt("Copy the link:", url);
+      }
+    }
+
+    function renderFileLimits(stats) {
+      const settings = settingsState && settingsState.current;
+      const perFile = settings ? `up to ${formatBytes(settings.max_file_size_bytes)} per file, ` : "";
+      document.getElementById("fileLimits").textContent =
+        `Stored on disk and shared through a public link: ${perFile}` +
+        `${formatBytes(stats.files_bytes)} of ${formatBytes(stats.max_files_bytes)} used.`;
+      if (settings) {
+        document.getElementById("fileDurationHelp").textContent =
+          `Up to ${formatDuration(settings.max_file_duration_minutes * 60000)}, counted from when the link opens`;
+      }
+    }
+
+    async function loadFiles() {
+      const result = await api("/files");
+      if (result.response.status === 401) {
+        show("loginView");
+        return;
+      }
+      if (!result.response.ok) {
+        setMessage("filesMessage", errorText(result, "Failed to load files"));
+        return;
+      }
+      renderFiles(result.data);
+    }
+
+    function renderFiles(files) {
+      const now = Date.now();
+      const rows = files.map((item) => {
+        const copyBtn = el("button", { className: "btn-ghost", type: "button" }, "Copy link");
+        copyBtn.addEventListener("click", () => copyLink(fileLink(item)));
+        const deleteBtn = el("button", { className: "btn-ghost danger", type: "button" }, "Delete");
+        deleteBtn.addEventListener("click", () => deleteFile(item));
+        const waiting = item.valid_from !== null && now < item.valid_from;
+        const status = waiting
+          ? `Opens in ${formatDuration(item.valid_from - now)}`
+          : `Expires in ${formatDuration(item.expires_at - now)}`;
+        const downloads = `${item.downloads} / ${item.max_downloads === null ? "∞" : item.max_downloads}`;
+        return el(
+          "tr",
+          {},
+          el("td", { className: "name", title: item.name },
+            el("a", { href: item.link, target: "_blank", rel: "noopener" }, item.name)),
+          el("td", {}, formatBytes(item.size)),
+          el("td", {}, downloads),
+          el("td", {}, status),
+          el("td", {}, el("div", { className: "row-actions" }, copyBtn, deleteBtn))
+        );
+      });
+      document.getElementById("filesSummary").textContent =
+        files.length === 0 ? "No file is shared right now." : `${files.length} file(s) with a valid link.`;
+      document.getElementById("filesTable").replaceChildren(
+        table(["Name", "Size", "Downloads", "Status", ""], rows)
+      );
+    }
+
+    async function deleteFile(item) {
+      if (!confirm(`Delete "${item.name}"? Its link stops working immediately.`)) return;
+      const result = await api(`/files/${encodeURIComponent(item.id)}`, { method: "DELETE" });
+      if (result.response.status === 204) {
+        setMessage("filesMessage", "File deleted.", "ok");
+      } else if (result.response.status === 401) {
+        show("loginView");
+        return;
+      } else {
+        setMessage("filesMessage", errorText(result, "Delete failed"));
+      }
+      await loadDashboard();
+    }
+
+    function selectFile(file) {
+      selectedFile = file;
+      document.getElementById("dropzoneTitle").textContent = file ? file.name : "Drop a file here or click to choose";
+      document.getElementById("dropzoneHint").textContent = file ? formatBytes(file.size) : "Any file type";
+      if (file) document.getElementById("fileName").value = file.name;
+      document.getElementById("fileUploadBtn").disabled = !file;
+      setMessage("fileMessage", "");
+    }
+
+    function setUploading(active) {
+      document.getElementById("fileUploadBtn").disabled = active || !selectedFile;
+      document.getElementById("fileCancel").disabled = !active;
+      document.getElementById("uploadProgress").hidden = !active;
+      for (const id of ["fileInput", "fileName", "fileDuration", "fileDurationUnit", "fileMaxDownloads", "fileValidFrom"]) {
+        document.getElementById(id).disabled = active;
+      }
+    }
+
+    // Reads the form into the upload query. Ranges are checked again by the server.
+    function readFileForm() {
+      const name = document.getElementById("fileName").value.trim();
+      const amount = Number(document.getElementById("fileDuration").value);
+      const unit = Number(document.getElementById("fileDurationUnit").value);
+      const maxRaw = document.getElementById("fileMaxDownloads").value.trim();
+      const fromRaw = document.getElementById("fileValidFrom").value;
+      if (!name) return { error: "Enter a name for the file." };
+      if (!Number.isInteger(amount) || amount < 1) return { error: "The duration must be a whole number of at least 1." };
+      const query = new URLSearchParams({ name, duration_minutes: String(amount * unit) });
+      if (maxRaw !== "") {
+        const max = Number(maxRaw);
+        if (!Number.isInteger(max) || max < 1) return { error: "Max downloads must be a whole number of at least 1." };
+        query.set("max_downloads", String(max));
+      }
+      if (fromRaw !== "") {
+        // datetime-local has no time zone: the browser reads it as local time.
+        const from = new Date(fromRaw).getTime();
+        if (Number.isNaN(from)) return { error: "The opening time is not valid." };
+        query.set("valid_from", String(from));
+      }
+      return { query };
+    }
+
+    function uploadFile(event) {
+      event.preventDefault();
+      if (!selectedFile) return;
+      const form = readFileForm();
+      if (form.error) {
+        setMessage("fileMessage", form.error);
+        return;
+      }
+      const settings = settingsState && settingsState.current;
+      if (settings && selectedFile.size > settings.max_file_size_bytes) {
+        setMessage("fileMessage", `The file is larger than the limit of ${formatBytes(settings.max_file_size_bytes)}.`);
+        return;
+      }
+
+      // XMLHttpRequest instead of fetch: only it reports upload progress.
+      const request = new XMLHttpRequest();
+      uploadRequest = request;
+      const started = Date.now();
+      request.upload.addEventListener("progress", (progress) => {
+        if (!progress.lengthComputable) return;
+        const percent = Math.floor((progress.loaded / progress.total) * 100);
+        const seconds = Math.max(0.001, (Date.now() - started) / 1000);
+        document.getElementById("progressBar").style.width = `${percent}%`;
+        document.getElementById("progressText").textContent =
+          `${percent}% · ${formatBytes(progress.loaded)} of ${formatBytes(progress.total)} · ${formatBytes(progress.loaded / seconds)}/s`;
+      });
+      request.addEventListener("loadend", async () => {
+        uploadRequest = null;
+        setUploading(false);
+        if (request.status === 401) {
+          show("loginView");
+          return;
+        }
+        let data = null;
+        try {
+          data = JSON.parse(request.responseText);
+        } catch {
+          // Not JSON: an aborted request or a proxy error page.
+        }
+        if (request.status === 201 && data) {
+          document.getElementById("fileForm").reset();
+          selectFile(null);
+          const copyBtn = el("button", { className: "btn-ghost", type: "button" }, "Copy link");
+          copyBtn.addEventListener("click", () => copyLink(fileLink(data)));
+          const message = document.getElementById("fileMessage");
+          message.className = "message ok";
+          message.replaceChildren(`Uploaded "${data.name}". `, copyBtn);
+          await loadDashboard();
+        } else if (request.status === 0) {
+          setMessage("fileMessage", "Upload cancelled or connection lost.");
+        } else {
+          setMessage("fileMessage", (data && data.error) || `Upload failed (HTTP ${request.status})`);
+        }
+      });
+
+      document.getElementById("progressBar").style.width = "0";
+      document.getElementById("progressText").textContent = "Starting...";
+      setMessage("fileMessage", "");
+      setUploading(true);
+      request.open("POST", `/api/admin/files?${form.query}`);
+      request.send(selectedFile);
+    }
+
+    const dropzone = document.getElementById("dropzone");
+    dropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropzone.classList.add("over");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("over"));
+    dropzone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("over");
+      if (uploadRequest) return;
+      const file = event.dataTransfer.files[0];
+      if (file) selectFile(file);
+    });
+    document.getElementById("fileInput").addEventListener("change", (event) => {
+      selectFile(event.target.files[0] || null);
+    });
+    document.getElementById("fileForm").addEventListener("submit", uploadFile);
+    document.getElementById("fileCancel").addEventListener("click", () => uploadRequest?.abort());
+    document.getElementById("filesRefresh").addEventListener("click", loadFiles);
 
     function renderStats(stats) {
       const cards = [
         ["Active assets", `${stats.active_assets} / ${stats.max_assets}`],
         ["Storage used", `${formatBytes(stats.storage_bytes)} / ${formatBytes(stats.max_storage_bytes)}`],
-        ["Uploaders", stats.uploaders.length],
+        ["Shared files", `${stats.files} · ${formatBytes(stats.files_bytes)} / ${formatBytes(stats.max_files_bytes)}`],
         ["Total uploads", stats.total_uploads],
         ["Total deleted", stats.total_deleted],
         ["Total requests", stats.total_requests],
@@ -791,7 +1188,7 @@
 
     const MIB = 1024 * 1024;
     const GIB = 1024 * MIB;
-    const TABS = ["overview", "settings", "account"];
+    const TABS = ["overview", "files", "settings", "account"];
     // kind: "int" (whole number), "mib"/"gib" (bytes shown in MiB/GiB), "ip" (one address),
     // "ips" (comma-separated addresses).
     // kind: "int" (whole number), "mib"/"gib" (bytes shown in MiB/GiB), "ip" (one address),
@@ -814,8 +1211,7 @@
       {
         id: "files",
         title: "Files",
-        description: "Files shared by the admin, stored on disk. File sharing is not available yet; " +
-          "these limits will apply to it.",
+        description: "Files shared by the admin from the Files tab, stored on disk.",
         fields: [
           { name: "max_file_size_bytes", label: "Max file size", kind: "gib", unit: "GiB", help: "Up to 100 GiB" },
           { name: "max_files_total_bytes", label: "Disk budget", kind: "gib", unit: "GiB", help: "All files together" },

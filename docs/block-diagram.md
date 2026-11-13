@@ -9,6 +9,7 @@ flowchart TD
         HtmlFiles[("data/html/")]
         LogFiles[("data/logs/")]
         AdminFiles[("data/admin/")]
+        StorageFiles[("data/storage/")]
 
         subgraph Process["Application"]
             subgraph Web["Actix Web server"]
@@ -18,6 +19,7 @@ flowchart TD
                 Content["GET /api/content/{id}"]
                 Stats["GET /api/stats"]
                 Limits["GET /api/limits"]
+                FileApi["GET /api/files/{id}"]
                 Admin["/api/admin/* (session cookie)"]
             end
 
@@ -32,6 +34,7 @@ flowchart TD
                 Counters["In-memory stats counters"]
                 Creds["Admin credential store"]
                 Settings["Settings store"]
+                Files["Shared file store"]
             end
         end
     end
@@ -45,6 +48,7 @@ flowchart TD
     Headers --> Content
     Headers --> Stats
     Headers --> Limits
+    Headers --> FileApi
     Headers --> Admin
 
     Admin --> Creds
@@ -54,6 +58,10 @@ flowchart TD
     Creds --> AdminFiles
     Admin --> Settings
     Settings --> AdminFiles
+    Admin --> Files
+    FileApi --> Files
+    Files --> StorageFiles
+    Cleanup --> Files
 
     Pages --> HtmlFiles
     Pages --> Logger
@@ -83,10 +91,10 @@ flowchart TD
     classDef task fill:#1a1a1a,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
     classDef state fill:#1a1a1a,stroke:#00ff99,stroke-width:2px,color:#cdd6f4
 
-    class Client,Proxy,HtmlFiles,LogFiles,AdminFiles external
-    class Headers,Pages,Upload,Content,Stats,Limits,Admin web
+    class Client,Proxy,HtmlFiles,LogFiles,AdminFiles,StorageFiles external
+    class Headers,Pages,Upload,Content,Stats,Limits,FileApi,Admin web
     class Cleanup task
-    class Store,Limit,Logger,Counters,Creds,Settings state
+    class Store,Limit,Logger,Counters,Creds,Settings,Files state
 
     style Overview fill:#1a1a1a,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Process fill:#1e1e2e,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
@@ -104,4 +112,5 @@ flowchart TD
 - `/api/stats` reads memory only. The log files are written but never read back.
 - The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in `trusted_proxies`.
 - Settings are loaded from `data/admin/settings.json` at startup and changed through `/api/admin/settings`; uploads, the rate limiter, and the log writer read the current values.
-- Admin credentials, the session key, and the settings are the only state kept on disk besides logs; everything else is lost on restart.
+- Shared files and their index live in `data/storage/`; the store reconciles the index with the directory at startup and the cleanup loop deletes expired files.
+- Admin credentials, the session key, the settings, and the shared files are the state kept on disk besides logs; everything else is lost on restart.

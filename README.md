@@ -19,6 +19,7 @@ Black Hole Share is a lightweight temporary sharing service built with Rust and 
 - Request and lifecycle logging with automatic rotation and bounded retention
 - Stats page showing active assets, storage usage, and recent activity
 - Admin panel to manage assets and change limits and server settings without editing files
+- File sharing for the admin: any file type, stored on disk, with an expiry, an optional download limit, and an optional opening time
 - Admin control panel at `/admin` to list and delete active assets and see uploads per IP
 
 ## Block Diagram
@@ -45,8 +46,8 @@ flowchart LR
 
 ## Runtime Characteristics
 
-- Assets are stored only in memory.
-- Uploaded content is lost when the process stops or restarts.
+- Public assets (text and images) are stored only in memory and are lost when the process stops or restarts.
+- Files shared by the admin are stored on disk in `data/storage/` and survive restarts until they expire.
 - Static web files and logs are read from `data/`.
 - `data/logs/` is created at startup if it is missing.
 - Logs are rotated on startup and whenever `log.txt` reaches the configured size (50 MiB by default).
@@ -77,10 +78,12 @@ The per-IP limit is released as that client's shared items expire. Image uploads
 | `src/admin.rs` | Admin panel API and session handling |
 | `src/auth.rs` | Admin credentials (Argon2id hash) and session key storage |
 | `src/settings.rs` | Runtime settings: defaults, validation, `settings.json` storage |
+| `src/files.rs` | Shared files on disk: upload, download counting, expiry, startup reconciliation |
 | `src/tests.rs` | Automated tests |
 | `data/html/` | Static frontend pages and web assets |
 | `data/logs/` | Runtime log output |
 | `data/admin/` | Admin credentials, session key, and settings, created at runtime, never commit it |
+| `data/storage/` | Files shared by the admin (`<uuid>`) and their index (`index.json`), created at runtime |
 
 ## Run Locally
 
@@ -138,9 +141,9 @@ Settings live in `data/admin/settings.json` and are edited in the **Settings** s
 | `max_asset_size_bytes` | `3145728` (3 MiB) | 1 to 104857600 (100 MiB) | immediately |
 | `max_total_storage_bytes` | `536870912` (512 MiB) | not below `max_asset_size_bytes` | immediately |
 | `max_uploads_per_ip` | `10` | 1 to 10000 | immediately |
-| `max_file_size_bytes` | `1073741824` (1 GiB) | 1 to 107374182400 (100 GiB) | reserved for file sharing |
-| `max_files_total_bytes` | `10737418240` (10 GiB) | not below `max_file_size_bytes` | reserved for file sharing |
-| `max_file_duration_minutes` | `10080` (7 days) | 1 to 525600 (365 days) | reserved for file sharing |
+| `max_file_size_bytes` | `1073741824` (1 GiB) | 1 to 107374182400 (100 GiB) | next file upload |
+| `max_files_total_bytes` | `10737418240` (10 GiB) | not below `max_file_size_bytes` | next file upload |
+| `max_file_duration_minutes` | `10080` (7 days) | 1 to 525600 (365 days) | next file upload |
 | `max_log_file_bytes` | `52428800` (50 MiB) | at least 1048576 (1 MiB) | next write |
 | `max_rotated_logs` | `10` | 0 to 1000 | next rotation |
 | `max_recent_activity` | `20` | 1 to 1000 | immediately |
@@ -203,6 +206,7 @@ bhs.example.com {
 | `GET` | `/bhs/{id}` | View a shared asset |
 | `GET` | `/stats` | Statistics dashboard |
 | `GET` | `/admin` | Admin control panel (login required) |
+| `GET` | `/f/{id}` | Download page of a shared file |
 
 Unknown paths return the error page with status `404`.
 
@@ -262,6 +266,20 @@ Returns the current upload limits, which the upload page uses for its duration s
 
 Returns the raw content with the stored MIME type and a sandbox `Content-Security-Policy`. Returns `400` if `{id}` is not a valid UUID, or `404` if the asset has expired or does not exist.
 
+### Shared Files
+
+`GET /api/files/{id}/info`
+
+Public details of a shared file: `name`, `size`, `expires_at`, `valid_from` (or `null`), `available`, and `downloads_left` (or `null` when unlimited). Times are Unix milliseconds. Returns `404` when the file does not exist, has expired, or reached its download limit.
+
+`GET /api/files/{id}`
+
+Sends the whole file as `application/octet-stream` with `Content-Disposition: attachment` and a sandbox `Content-Security-Policy`, so a browser always saves it and never renders it.
+
+- Every request is one counted download. `Range` requests are not supported on purpose: a download limit could otherwise be bypassed by fetching the file in pieces, so an interrupted download restarts from the beginning.
+- When the last allowed download starts, the file is deleted; that download still completes.
+- `403` with `valid_from` before the opening time, `404` as above, `400` for an invalid id.
+
 ### Stats
 
 `GET /api/stats`
@@ -291,7 +309,8 @@ Logged event types:
 - asset uploads
 - asset deletions
 - error events
-- admin actions: setup, login, failed login, logout, password change, asset deletion, settings change (with the old and new value of each changed field)
+- admin actions: setup, login, failed login, logout, password change, asset deletion, settings change (with the old and new value of each changed field), file upload and deletion
+- shared file events: download (with the client IP and the download count) and expiry
 
 On startup, an existing log file is renamed with a UTC timestamp before a new `log.txt` is created. The same rotation happens while running when `log.txt` reaches `max_log_file_bytes` (50 MiB by default). Only the `max_rotated_logs` most recent rotated logs are kept (10 by default); older ones are deleted.
 
@@ -317,7 +336,8 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 - Usage cards: active assets, storage, totals since startup
 - Active uploads grouped by uploader IP
 - Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
-- Tabs: **Overview** (usage, uploads by IP, active assets), **Settings**, **Account** (password); the tab is kept in the URL (`/admin#settings`)
+- Tabs: **Overview** (usage, uploads by IP, active assets), **Files**, **Settings**, **Account** (password); the tab is kept in the URL (`/admin#files`)
+- Files: drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time; upload with progress and cancel; list with downloads, status, copy link, and delete
 - Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
 - Password change
 
@@ -336,6 +356,9 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
 | `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
 | `GET` | `/settings` | yes | `current` (saved), `running` (in use since startup), and `defaults` settings, `restart_fields`, and `restart_pending` |
+| `POST` | `/files?name=&duration_minutes=&max_downloads=&valid_from=` | yes | Raw file bytes as the body, `Content-Length` required (`411` without it). `duration_minutes` counts from `valid_from` (Unix ms) when given. `201` with the file and its `link`; `400` invalid input or a body that does not match its length, `413` over `max_file_size_bytes`, `507` over `max_files_total_bytes` |
+| `GET` | `/files` | yes | Shared files that have not expired, with downloads and `link` |
+| `DELETE` | `/files/{id}` | yes | Delete a shared file now; `204`, `400` for an invalid id, `404` if missing |
 | `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
 
 Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.

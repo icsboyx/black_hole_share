@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::auth::CredentialStore;
+use crate::files::FileStore;
 use crate::logs::{LogEventType, LogFile};
 use crate::settings::{Settings, SettingsStore};
 
@@ -103,6 +104,7 @@ pub struct AppState {
     pub log_file: LogFile,
     pub admin: CredentialStore,
     pub settings: SettingsStore,
+    pub files: FileStore,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -298,5 +300,16 @@ pub(crate) async fn log_removed_assets(removed: &[Asset], log: &LogFile) {
 pub async fn clear_app_data(app_state: &AppState) -> Result<()> {
     app_state.assets.remove_expired(&app_state.log_file).await;
     app_state.connection_tracker.clear_expired().await;
+    let expired = app_state.files.remove_expired().await?;
+    for file in expired {
+        let event = serde_json::json!({ "action": "expired", "id": file.id, "name": file.name });
+        if let Err(e) = app_state
+            .log_file
+            .write_event(LogEventType::File(event))
+            .await
+        {
+            eprintln!("Failed to log file expiry: {}", e);
+        }
+    }
     Ok(())
 }

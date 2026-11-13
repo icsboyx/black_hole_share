@@ -2,6 +2,7 @@ mod admin;
 mod api;
 mod auth;
 mod data_mgt;
+mod files;
 mod logs;
 mod settings;
 #[cfg(test)]
@@ -31,6 +32,7 @@ pub static LOG_DIR: &str = "data/logs/";
 pub static ADMIN_CREDENTIALS_FILE: &str = "data/admin/credentials.json";
 pub static SESSION_KEY_FILE: &str = "data/admin/session.key";
 pub static SETTINGS_FILE: &str = "data/admin/settings.json";
+pub static STORAGE_DIR: &str = "data/storage/";
 pub static LOG_FILE_NAME: &str = "log.txt";
 // Limits and bind address now live in SETTINGS_FILE; these variables are no longer read.
 static IGNORED_ENV_VARS: &[&str] = &["BIND_ADDR", "BIND_PORT", "TRUSTED_PROXIES"];
@@ -78,7 +80,7 @@ pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
 });
 
 use crate::{
-    api::{api_get_asset, api_limits, api_stats, api_upload},
+    api::{api_file_download, api_file_info, api_get_asset, api_limits, api_stats, api_upload},
     data_mgt::AppState,
     logs::{LogEventType, LogFile},
 };
@@ -131,6 +133,20 @@ async fn view_asset(
     app_state: web::Data<AppState>,
 ) -> actix_web::Result<HttpResponse> {
     let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "view.html");
+    app_state
+        .log_file
+        .write_event(LogEventType::HttpRequest(req.into()))
+        .await
+        .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
+    get_static_file(path).await
+}
+
+#[get("/f/{id}")]
+async fn file_page(
+    req: HttpRequest,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let path: PathBuf = PathBuf::from(HTML_DIR.to_string() + "file.html");
     app_state
         .log_file
         .write_event(LogEventType::HttpRequest(req.into()))
@@ -196,6 +212,7 @@ async fn main() -> Result<()> {
         log_file,
         admin,
         settings,
+        files: files::FileStore::load(STORAGE_DIR).await?,
     };
 
     let bind = (startup.bind_addr, startup.bind_port);
@@ -237,6 +254,9 @@ fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::Sess
         .service(stats)
         .service(admin_page)
         .service(view_asset)
+        .service(file_page)
+        .service(api_file_info)
+        .service(api_file_download)
         .service(api_get_asset)
         .service(api_upload)
         .service(api_limits)
