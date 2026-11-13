@@ -248,7 +248,7 @@ pub async fn load_or_create_session_key(path: &Path) -> Result<Key> {
 
 /// Writes through a temporary file and a rename, so a crash never leaves a half-written file.
 /// The file is readable only by the owner because it holds secrets.
-async fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) async fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let Some(dir) = path.parent() else {
         bail!("{} has no parent directory", path.display());
     };

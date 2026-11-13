@@ -14,10 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Encrypted, `HttpOnly`, `SameSite=Strict` session cookie limited to `/api/admin`, valid for at most 8 hours; logout and password change end every session.
 - `ADMIN_COOKIE_SECURE` environment variable to allow the admin cookie over plain HTTP.
 - Admin actions, including failed logins, are written to the log.
+- Admin bar on every page, shown only to the logged-in admin, with links and logout.
+- Settings stored in `data/admin/settings.json` and edited from the admin panel: upload limits, log limits, trusted proxies, session lifetime, bind address and port. Limits apply immediately; bind address, port, and session lifetime after a restart. Every change is logged.
+- `GET /api/limits` returns the upload limits; the upload page builds its duration slider from them.
 
 ### Changed
 
 - `GET /api/content/{id}` returns 400 instead of 404 when `{id}` is not a valid UUID.
+- **Breaking:** `BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; set them in the admin panel. The server warns at startup when they are still set.
+- `POST /api/upload` reads its body against the current size limit instead of a JSON limit fixed at startup; a body that is not `application/json` gets `415`, invalid JSON gets `400`.
 
 ### Fixed
 

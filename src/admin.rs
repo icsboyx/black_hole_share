@@ -13,7 +13,7 @@ use actix_web::{
     error::{ErrorInternalServerError, ErrorUnauthorized},
     get,
     middleware::DefaultHeaders,
-    post, web,
+    post, put, web,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -21,16 +21,16 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    MAX_ASSETS, MAX_TOTAL_STORAGE_BYTES, MAX_UPLOADS_PER_USER,
     auth::AuthError,
     data_mgt::{AppState, log_removed_assets},
-    logs::LogEventType,
+    logs::{LogEventType, LogLimits},
+    settings::{FieldError, Settings, UpdateError},
 };
 
 pub const SESSION_COOKIE_NAME: &str = "bhs_admin";
-/// Hard limit on a login. The cookie store cannot revoke a cookie, so the server checks
-/// the issue time itself instead of trusting the cookie's Max-Age.
-pub const SESSION_MAX_AGE_SECS: i64 = 8 * 60 * 60;
+
+/// Settings read only at startup: a new value needs a restart.
+const RESTART_FIELDS: &[&str] = &["bind_addr", "bind_port", "admin_session_max_age_minutes"];
 
 const SESSION_USER: &str = "admin_user";
 const SESSION_VERSION: &str = "admin_version";
@@ -41,6 +41,9 @@ pub struct SessionSettings {
     pub key: Key,
     /// Send the cookie only over HTTPS. Disable only for plain-HTTP setups.
     pub cookie_secure: bool,
+    /// Hard limit on a login. The cookie store cannot revoke a cookie, so the server
+    /// checks the issue time itself instead of trusting the cookie's Max-Age.
+    pub max_age_secs: i64,
 }
 
 /// Registers the admin API. The session middleware wraps only this scope, so public
@@ -54,7 +57,7 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
         // Strict keeps the cookie off every cross-site request, which blocks CSRF.
         .cookie_same_site(SameSite::Strict)
         .session_lifecycle(
-            PersistentSession::default().session_ttl(Duration::seconds(SESSION_MAX_AGE_SECS)),
+            PersistentSession::default().session_ttl(Duration::seconds(settings.max_age_secs)),
         )
         .build();
 
@@ -70,7 +73,9 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
             .service(change_password)
             .service(list_assets)
             .service(delete_asset)
-            .service(stats),
+            .service(stats)
+            .service(get_settings)
+            .service(update_settings),
     );
 }
 
@@ -289,6 +294,7 @@ async fn stats(
     require_admin(&session, &app_state).await?;
     let assets = app_state.assets.active_list().await;
     let log_stats = app_state.log_file.stats().await;
+    let settings = app_state.settings.get();
 
     let mut by_ip: HashMap<String, UploaderStats> = HashMap::new();
     for asset in &assets {
@@ -306,14 +312,162 @@ async fn stats(
     Ok(HttpResponse::Ok().json(json!({
         "active_assets": assets.len(),
         "storage_bytes": assets.iter().map(|a| a.size_bytes()).sum::<usize>(),
-        "max_assets": MAX_ASSETS,
-        "max_storage_bytes": MAX_TOTAL_STORAGE_BYTES,
-        "max_uploads_per_ip": MAX_UPLOADS_PER_USER,
+        "max_assets": settings.max_assets,
+        "max_storage_bytes": settings.max_total_storage_bytes,
+        "max_uploads_per_ip": settings.max_uploads_per_ip,
         "total_uploads": log_stats.total_uploads,
         "total_deleted": log_stats.total_deleted,
         "total_requests": log_stats.total_requests,
         "uploaders": uploaders,
     })))
+}
+
+#[get("/settings")]
+async fn get_settings(
+    session: Session,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    require_admin(&session, &app_state).await?;
+    Ok(HttpResponse::Ok().json(settings_response(&app_state)))
+}
+
+/// Replaces every setting at once. The body must list all fields: a missing one is an
+/// error instead of a silent reset to its default.
+#[put("/settings")]
+async fn update_settings(
+    req: HttpRequest,
+    session: Session,
+    body: web::Json<Value>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let new = match parse_settings(body.into_inner()) {
+        Ok(settings) => settings,
+        Err(errors) => return Ok(invalid_settings_response(errors)),
+    };
+
+    match app_state.settings.update(new.clone()).await {
+        Ok(previous) => {
+            app_state.log_file.set_limits(LogLimits::from(&new)).await;
+            log_admin(
+                &app_state,
+                &req,
+                "settings_changed",
+                json!({ "username": username, "changes": setting_changes(&previous, &new) }),
+            )
+            .await;
+            Ok(HttpResponse::Ok().json(settings_response(&app_state)))
+        }
+        Err(UpdateError::Invalid(errors)) => Ok(invalid_settings_response(errors)),
+        Err(UpdateError::Internal(e)) => {
+            eprintln!("Cannot save settings: {e:#}");
+            Ok(
+                HttpResponse::InternalServerError()
+                    .json(json!({ "error": "Cannot save settings" })),
+            )
+        }
+    }
+}
+
+/// Checks every field on its own, so one bad value (say, a malformed IP) does not hide
+/// the errors of the others, and each error names its field.
+fn parse_settings(body: Value) -> Result<Settings, Vec<FieldError>> {
+    let error = |field: &str, message: String| FieldError {
+        field: field.to_string(),
+        message,
+    };
+    let Value::Object(body) = body else {
+        return Err(vec![error("body", "must be a JSON object".into())]);
+    };
+    let names = setting_names();
+    let mut errors: Vec<FieldError> = body
+        .keys()
+        .filter(|name| !names.contains(name))
+        .map(|name| error(name, "is not a known setting".into()))
+        .collect();
+
+    let mut valid = serde_json::Map::new();
+    for name in &names {
+        let Some(value) = body.get(name) else {
+            errors.push(error(name, "is required".into()));
+            continue;
+        };
+        // Missing fields take their default, so this checks only the type of `name`.
+        let single = Value::Object([(name.clone(), value.clone())].into_iter().collect());
+        match serde_json::from_value::<Settings>(single) {
+            Ok(_) => {
+                valid.insert(name.clone(), value.clone());
+            }
+            Err(e) => errors.push(error(name, e.to_string())),
+        }
+    }
+
+    let settings: Settings = serde_json::from_value(Value::Object(valid))
+        .map_err(|e| vec![error("body", e.to_string())])?;
+    // Range rules for fields that already failed the type check would only repeat it.
+    let failed: Vec<String> = errors.iter().map(|e| e.field.clone()).collect();
+    errors.extend(
+        settings
+            .validate()
+            .into_iter()
+            .filter(|e| !failed.contains(&e.field)),
+    );
+    if errors.is_empty() { Ok(settings) } else { Err(errors) }
+}
+
+fn invalid_settings_response(errors: Vec<FieldError>) -> HttpResponse {
+    HttpResponse::BadRequest().json(json!({ "error": "Invalid settings", "fields": errors }))
+}
+
+/// `current` is what the file holds, `running` what the server started with. Restart-only
+/// fields that differ between the two are listed in `restart_pending`.
+fn settings_response(app_state: &AppState) -> Value {
+    let current = app_state.settings.get();
+    let running = app_state.settings.running();
+    let current_value = settings_value(&current);
+    let running_value = settings_value(running);
+    let restart_pending: Vec<&str> = RESTART_FIELDS
+        .iter()
+        .copied()
+        .filter(|name| current_value.get(*name) != running_value.get(*name))
+        .collect();
+    json!({
+        "current": current_value,
+        "running": running_value,
+        "restart_fields": RESTART_FIELDS,
+        "restart_pending": restart_pending,
+    })
+}
+
+fn settings_value(settings: &Settings) -> Value {
+    serde_json::to_value(settings).unwrap_or(Value::Null)
+}
+
+/// Field names as they appear in JSON, taken from the serialized struct so the list
+/// cannot drift from `Settings`.
+fn setting_names() -> Vec<String> {
+    match settings_value(&Settings::default()) {
+        Value::Object(map) => map.into_iter().map(|(name, _)| name).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `{field: {from, to}}` for every field that changed, for the admin log.
+fn setting_changes(previous: &Settings, new: &Settings) -> Value {
+    let (Value::Object(before), Value::Object(after)) =
+        (settings_value(previous), settings_value(new))
+    else {
+        return Value::Null;
+    };
+    let changes: serde_json::Map<String, Value> = after
+        .into_iter()
+        .filter(|(name, value)| before.get(name) != Some(value))
+        .map(|(name, value)| {
+            let from = before.get(&name).cloned().unwrap_or(Value::Null);
+            (name, json!({ "from": from, "to": value }))
+        })
+        .collect();
+    Value::Object(changes)
 }
 
 fn start_session(session: &Session, username: &str, version: u64) -> actix_web::Result<()> {
@@ -349,7 +503,8 @@ async fn current_admin(
     };
 
     let age = Utc::now().timestamp() - issued_at;
-    let fresh = (0..SESSION_MAX_AGE_SECS).contains(&age);
+    let max_age = app_state.settings.running().admin_session_max_age_secs();
+    let fresh = (0..max_age).contains(&age);
     if fresh && app_state.admin.session_is_current(&username, version).await {
         Ok(Some(username))
     } else {

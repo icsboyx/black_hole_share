@@ -97,6 +97,20 @@
       return `${remainder}s`;
     }
 
+    // The allowed durations come from the server settings; the slider's markup values are
+    // only a fallback for when the request fails.
+    fetch("/api/limits")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((limits) => {
+        if (!limits) return;
+        durationSlider.min = String(limits.min_duration_minutes);
+        durationSlider.max = String(limits.max_duration_minutes);
+        const clamped = Math.min(limits.max_duration_minutes, Math.max(limits.min_duration_minutes, durationSlider.valueAsNumber));
+        durationSlider.valueAsNumber = clamped;
+        durationValue.textContent = durationSlider.value;
+      })
+      .catch(() => { });
+
     // Update duration display
     durationSlider.addEventListener("input", function () {
       durationValue.textContent = this.value;
@@ -256,8 +270,9 @@
       uploadZone.style.justifyContent = "";
       uploadZone.style.padding = "";
       fileInput.value = "";
+      // The browser clamps the value to the slider's current min/max.
       durationSlider.value = "5";
-      durationValue.textContent = "5";
+      durationValue.textContent = durationSlider.value;
       document.querySelector('label[for="durationSlider"]').style.display =
         "";
       durationSlider.style.display = "";

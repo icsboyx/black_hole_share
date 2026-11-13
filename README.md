@@ -9,7 +9,7 @@ Black Hole Share is a lightweight temporary sharing service built with Rust and 
 ## Features
 
 - Web UI for drag and drop, clipboard paste, click-to-upload, and text sharing
-- Temporary links with a configurable lifetime from 1 to 60 minutes
+- Temporary links with a configurable lifetime, 1 to 60 minutes by default
 - Automatic cleanup of expired assets
 - Simple JSON API for uploads, content retrieval, and live statistics
 - In-memory storage with no database dependency
@@ -18,6 +18,7 @@ Black Hole Share is a lightweight temporary sharing service built with Rust and 
 - Upload type allowlist, sandboxed content delivery, and security headers on every response
 - Request and lifecycle logging with automatic rotation and bounded retention
 - Stats page showing active assets, storage usage, and recent activity
+- Admin panel to manage assets and change limits and server settings without editing files
 - Admin control panel at `/admin` to list and delete active assets and see uploads per IP
 
 ## Block Diagram
@@ -48,20 +49,22 @@ flowchart LR
 - Uploaded content is lost when the process stops or restarts.
 - Static web files and logs are read from `data/`.
 - `data/logs/` is created at startup if it is missing.
-- Logs are rotated on startup and whenever `log.txt` reaches 50 MB.
-- Admin credentials and the session key are stored in `data/admin/` and survive restarts.
+- Logs are rotated on startup and whenever `log.txt` reaches the configured size (50 MiB by default).
+- Admin credentials, the session key, and the settings are stored in `data/admin/` and survive restarts.
 
 ## Limits
 
-| Item | Value |
+Defaults; all of them can be changed in the admin panel (see [Configuration](#configuration)).
+
+| Item | Default |
 | --- | --- |
 | Asset TTL | 1 to 60 minutes |
-| Max decoded asset size | 3 MB |
+| Max decoded asset size | 3 MiB |
 | Max in-memory assets | 1000 |
-| Max total in-memory size | 512 MB |
+| Max total in-memory size | 512 MiB |
 | Max active uploads per IP | 10 |
 
-The per-IP limit is released as that client's shared items expire. Image uploads are sent as base64 in JSON, so the HTTP request body may be larger than the decoded asset.
+The per-IP limit is released as that client's shared items expire. Image uploads are sent as base64 in JSON, so the HTTP request body may be larger than the decoded asset; the server accepts a body of up to twice the asset size limit plus 1 KiB.
 
 ## Project Layout
 
@@ -73,10 +76,11 @@ The per-IP limit is released as that client's shared items expire. Image uploads
 | `src/logs.rs` | JSON line logging, log rotation, and in-memory stats counters |
 | `src/admin.rs` | Admin panel API and session handling |
 | `src/auth.rs` | Admin credentials (Argon2id hash) and session key storage |
+| `src/settings.rs` | Runtime settings: defaults, validation, `settings.json` storage |
 | `src/tests.rs` | Automated tests |
 | `data/html/` | Static frontend pages and web assets |
 | `data/logs/` | Runtime log output |
-| `data/admin/` | Admin credentials and session key, created at runtime, never commit it |
+| `data/admin/` | Admin credentials, session key, and settings, created at runtime, never commit it |
 
 ## Run Locally
 
@@ -92,7 +96,7 @@ Start the server:
 cargo run --release
 ```
 
-Default bind address and port:
+Default bind address and port, changeable in the admin panel:
 
 - Address: `0.0.0.0`
 - Port: `8080`
@@ -124,30 +128,50 @@ Then open:
 
 ## Configuration
 
+Settings live in `data/admin/settings.json` and are edited in the **Settings** section of the admin panel. The file is created with the defaults on first start. A file that cannot be parsed, has an unknown field, or holds a value outside the allowed range stops startup and names the problem; a missing field takes its default.
+
+| Setting | Default | Allowed | Applies |
+| --- | --- | --- | --- |
+| `min_asset_duration_minutes` | `1` | 1 or more, not above the maximum | immediately |
+| `max_asset_duration_minutes` | `60` | up to 1440 | immediately |
+| `max_assets` | `1000` | 1 to 100000 | immediately |
+| `max_asset_size_bytes` | `3145728` (3 MiB) | 1 to 104857600 (100 MiB) | immediately |
+| `max_total_storage_bytes` | `536870912` (512 MiB) | not below `max_asset_size_bytes` | immediately |
+| `max_uploads_per_ip` | `10` | 1 to 10000 | immediately |
+| `max_log_file_bytes` | `52428800` (50 MiB) | at least 1048576 (1 MiB) | next write |
+| `max_rotated_logs` | `10` | 0 to 1000 | next rotation |
+| `max_recent_activity` | `20` | 1 to 1000 | immediately |
+| `trusted_proxies` | `[]` | up to 64 IP addresses | immediately |
+| `admin_session_max_age_minutes` | `480` | 5 to 10080 | after restart |
+| `bind_addr` | `0.0.0.0` | an IP address | after restart |
+| `bind_port` | `8080` | 1 to 65535 | after restart |
+
+When the server runs in a container, changing `bind_addr` or `bind_port` also needs a matching port mapping, or the server is unreachable after the restart.
+
+One environment variable is still read:
+
 | Environment Variable | Default | Description |
 | --- | --- | --- |
-| `BIND_ADDR` | `0.0.0.0` | Address the HTTP server binds to |
-| `BIND_PORT` | `8080` | Port the HTTP server binds to |
-| `TRUSTED_PROXIES` | empty | Comma-separated proxy IPs allowed to report the client address via `X-Forwarded-For` |
 | `ADMIN_COOKIE_SECURE` | `true` | `false` lets the admin session cookie work over plain HTTP; any other value stops startup |
+
+`BIND_ADDR`, `BIND_PORT`, and `TRUSTED_PROXIES` are no longer read; the server prints a warning if they are set.
 
 ## Reverse Proxy
 
-Behind a reverse proxy, set `TRUSTED_PROXIES` to the proxy IP. Separate multiple proxies with commas. CIDR ranges are not supported, so give the proxy a fixed IP.
+Behind a reverse proxy, add the proxy IP to **Trusted proxies** in the admin panel (`trusted_proxies` in `settings.json`). Separate multiple proxies with commas. CIDR ranges are not supported, so give the proxy a fixed IP.
 
-```yaml
-environment:
-  - TRUSTED_PROXIES=10.89.77.2
+```json
+"trusted_proxies": ["10.89.77.2"]
 ```
 
 The client address used for upload limits and logs is resolved as follows:
 
 | Request comes from | Address used |
 | --- | --- |
-| A proxy in `TRUSTED_PROXIES` | The last untrusted entry in `X-Forwarded-For`, or the proxy IP if there is none |
+| A proxy in `trusted_proxies` | The last untrusted entry in `X-Forwarded-For`, or the proxy IP if there is none |
 | Any other peer | The connection IP; forwarding headers are ignored |
 
-Without `TRUSTED_PROXIES`, every client appears to come from the proxy and all of them share one upload limit.
+Without `trusted_proxies`, every client appears to come from the proxy and all of them share one upload limit.
 
 Do not enable an option that makes the proxy trust incoming forwarding headers, such as `forwardedHeaders.trustedIPs` in Traefik or `trusted_proxies` in Caddy, unless another proxy sits in front of it.
 
@@ -207,13 +231,27 @@ Successful response:
 
 Possible error responses include:
 
-- `400 Bad Request` for invalid base64 input
-- `413 Payload Too Large` for assets above 3 MB
-- `415 Unsupported Media Type` for a `content_type` that is not allowed
+- `400 Bad Request` for invalid JSON or invalid base64 input
+- `413 Payload Too Large` for assets above `max_asset_size_bytes`
+- `415 Unsupported Media Type` for a body that is not `application/json`, or a `content_type` that is not allowed
 - `429 Too Many Requests` when the active upload limit is exceeded
 - `503 Service Unavailable` when the in-memory storage is full
 
-The requested duration is clamped to the supported range of `1..=60` minutes.
+The requested duration is clamped to the configured range, `1..=60` minutes by default.
+
+### Limits
+
+`GET /api/limits`
+
+Returns the current upload limits, which the upload page uses for its duration slider:
+
+```json
+{
+  "min_duration_minutes": 1,
+  "max_duration_minutes": 60,
+  "max_asset_size_bytes": 3145728
+}
+```
 
 ### Fetch Shared Content
 
@@ -250,9 +288,9 @@ Logged event types:
 - asset uploads
 - asset deletions
 - error events
-- admin actions: setup, login, failed login, logout, password change, asset deletion
+- admin actions: setup, login, failed login, logout, password change, asset deletion, settings change (with the old and new value of each changed field)
 
-On startup, an existing log file is renamed with a UTC timestamp before a new `log.txt` is created. The same rotation happens while running when `log.txt` reaches 50 MB. Only the 10 most recent rotated logs are kept; older ones are deleted.
+On startup, an existing log file is renamed with a UTC timestamp before a new `log.txt` is created. The same rotation happens while running when `log.txt` reaches `max_log_file_bytes` (50 MiB by default). Only the `max_rotated_logs` most recent rotated logs are kept (10 by default); older ones are deleted.
 
 ## Admin Panel
 
@@ -267,7 +305,7 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 ### Sessions
 
 - Login sets the `bhs_admin` cookie: encrypted with the key in `data/admin/session.key`, `HttpOnly`, `SameSite=Strict`, limited to `/api/admin`, and `Secure` unless `ADMIN_COOKIE_SECURE=false`.
-- A session lasts at most 8 hours.
+- A session lasts at most `admin_session_max_age_minutes` (8 hours by default).
 - Logging out or changing the password ends every admin session, on every device.
 - Browsers accept `Secure` cookies on `http://localhost` and `http://127.0.0.1`. For any other plain-HTTP address the login cannot work unless you set `ADMIN_COOKIE_SECURE=false`; prefer HTTPS through a reverse proxy instead.
 
@@ -276,6 +314,7 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 - Usage cards: active assets, storage, totals since startup
 - Active uploads grouped by uploader IP
 - Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
+- Settings: every value in [Configuration](#configuration), with per-field errors and a notice when a restart is needed
 - Password change
 
 ### Admin API
@@ -292,6 +331,8 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `GET` | `/assets` | yes | Active assets |
 | `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
 | `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
+| `GET` | `/settings` | yes | `current` (saved) and `running` (in use since startup) settings, `restart_fields`, and `restart_pending` |
+| `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
 
 Usernames are 1 to 64 characters without control characters or surrounding spaces; passwords are 8 to 256 characters. Routes that need a login return `401` without a valid session.
 

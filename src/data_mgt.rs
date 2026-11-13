@@ -10,9 +10,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::auth::CredentialStore;
-use crate::logs::LogFile;
-use crate::{MAX_ASSETS, MAX_TOTAL_STORAGE_BYTES};
-use crate::{MAX_UPLOADS_PER_USER, logs::LogEventType};
+use crate::logs::{LogEventType, LogFile};
+use crate::settings::{Settings, SettingsStore};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Asset {
@@ -103,6 +102,7 @@ pub struct AppState {
     pub connection_tracker: RateLimiter,
     pub log_file: LogFile,
     pub admin: CredentialStore,
+    pub settings: SettingsStore,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,11 +114,12 @@ pub struct AssetStorage {
 impl AssetStorage {
     pub fn new() -> Self {
         Self {
-            assets: Arc::new(Mutex::new(Vec::with_capacity(MAX_ASSETS))),
+            assets: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
-    pub async fn add_asset(&self, asset: Asset, log: &LogFile) -> Result<()> {
+    /// Stores the asset if it fits the asset count and total size limits in `settings`.
+    pub async fn add_asset(&self, asset: Asset, settings: &Settings, log: &LogFile) -> Result<()> {
         let now = chrono::Utc::now();
 
         let (removed, result) = {
@@ -126,8 +127,8 @@ impl AssetStorage {
             let removed: Vec<Asset> = assets.extract_if(.., |a| a.is_expired()).collect();
 
             let used_bytes: usize = assets.iter().map(Asset::size_bytes).sum();
-            let result = if assets.len() >= MAX_ASSETS
-                || used_bytes + asset.size_bytes() > MAX_TOTAL_STORAGE_BYTES
+            let result = if assets.len() >= settings.max_assets
+                || used_bytes + asset.size_bytes() > settings.max_total_storage_bytes
             {
                 Err(anyhow::anyhow!("Asset storage full"))
             } else {
@@ -227,7 +228,13 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    pub async fn check(&self, client_ip: &str, asset_exp_time: i64) -> (bool, Option<i64>) {
+    /// Takes an upload slot for `client_ip` unless it already holds `max_uploads` of them.
+    pub async fn check(
+        &self,
+        client_ip: &str,
+        asset_exp_time: i64,
+        max_uploads: usize,
+    ) -> (bool, Option<i64>) {
         self.clear_expired().await;
         let now = Utc::now().timestamp_millis();
         let mut clients = self.clients.lock().await;
@@ -235,7 +242,7 @@ impl RateLimiter {
             .entry(client_ip.to_string())
             .or_insert_with(Vec::new);
 
-        if entry.len() < MAX_UPLOADS_PER_USER {
+        if entry.len() < max_uploads {
             entry.push(asset_exp_time);
             (true, None)
         } else {

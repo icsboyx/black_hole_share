@@ -15,20 +15,67 @@ use tokio::{
     sync::Mutex,
 };
 
-use crate::{MAX_LOG_FILE_BYTES, MAX_ROTATED_LOGS};
+use crate::settings::Settings;
 
-const MAX_RECENT_ACTIVITY: usize = 20;
+/// Log limits taken from the settings; they can change while the server runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogLimits {
+    /// Size at which `log.txt` is rotated.
+    pub max_bytes: u64,
+    /// Rotated logs to keep; older ones are deleted.
+    pub max_rotated: usize,
+    /// Entries kept for the "recent activity" list of the stats page.
+    pub max_recent: usize,
+}
+
+impl From<&Settings> for LogLimits {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            max_bytes: settings.max_log_file_bytes,
+            max_rotated: settings.max_rotated_logs,
+            max_recent: settings.max_recent_activity,
+        }
+    }
+}
+
+impl Default for LogLimits {
+    fn default() -> Self {
+        Self::from(&Settings::default())
+    }
+}
 
 /// Counters for the current run, kept in memory so /api/stats never has to read the log.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LogStats {
     pub total_requests: usize,
     pub total_uploads: usize,
     pub total_deleted: usize,
     pub recent_activity: VecDeque<LogEvent>,
+    max_recent: usize,
 }
 
 impl LogStats {
+    fn new(max_recent: usize) -> Self {
+        Self {
+            total_requests: 0,
+            total_uploads: 0,
+            total_deleted: 0,
+            recent_activity: VecDeque::new(),
+            max_recent,
+        }
+    }
+
+    fn set_max_recent(&mut self, max_recent: usize) {
+        self.max_recent = max_recent;
+        self.trim_recent();
+    }
+
+    fn trim_recent(&mut self) {
+        while self.recent_activity.len() > self.max_recent {
+            self.recent_activity.pop_front();
+        }
+    }
+
     fn record(&mut self, log_event: &LogEvent) {
         match log_event.event {
             LogEventType::HttpRequest(_) => self.total_requests += 1,
@@ -39,9 +86,7 @@ impl LogStats {
         }
         if !matches!(log_event.event, LogEventType::HttpRequest(_)) {
             self.recent_activity.push_back(log_event.clone());
-            if self.recent_activity.len() > MAX_RECENT_ACTIVITY {
-                self.recent_activity.pop_front();
-            }
+            self.trim_recent();
         }
     }
 }
@@ -50,6 +95,8 @@ impl LogStats {
 struct LogWriter {
     file: File,
     size: u64,
+    max_bytes: u64,
+    max_rotated: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -57,38 +104,47 @@ pub struct LogFile {
     path: PathBuf,
     writer: Arc<Mutex<LogWriter>>,
     stats: Arc<Mutex<LogStats>>,
-    max_bytes: u64,
-    max_rotated: usize,
 }
 
 impl LogFile {
+    #[cfg(test)]
     pub async fn new(path: impl Into<PathBuf>) -> Result<Self> {
-        Self::with_limits(path, MAX_LOG_FILE_BYTES, MAX_ROTATED_LOGS).await
+        Self::with_limits(path, LogLimits::default()).await
     }
 
-    pub async fn with_limits(
-        path: impl Into<PathBuf>,
-        max_bytes: u64,
-        max_rotated: usize,
-    ) -> Result<Self> {
+    pub async fn with_limits(path: impl Into<PathBuf>, limits: LogLimits) -> Result<Self> {
         let path = path.into();
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
         if LogFile::log_file_exist(&path).await? {
             LogFile::log_file_rotate(&path).await?;
-            LogFile::prune_rotated_logs(&path, max_rotated).await?;
+            LogFile::prune_rotated_logs(&path, limits.max_rotated).await?;
         }
 
         let file = LogFile::open_log(&path).await?;
         println!("Log file created at: {}", path.display());
         Ok(Self {
             path,
-            writer: Arc::new(Mutex::new(LogWriter { file, size: 0 })),
-            stats: Arc::new(Mutex::new(LogStats::default())),
-            max_bytes,
-            max_rotated,
+            writer: Arc::new(Mutex::new(LogWriter {
+                file,
+                size: 0,
+                max_bytes: limits.max_bytes,
+                max_rotated: limits.max_rotated,
+            })),
+            stats: Arc::new(Mutex::new(LogStats::new(limits.max_recent))),
         })
+    }
+
+    /// Applies new limits. A lower size limit takes effect at the next write; extra rotated
+    /// logs are deleted at the next rotation.
+    pub async fn set_limits(&self, limits: LogLimits) {
+        {
+            let mut writer = self.writer.lock().await;
+            writer.max_bytes = limits.max_bytes;
+            writer.max_rotated = limits.max_rotated;
+        }
+        self.stats.lock().await.set_max_recent(limits.max_recent);
     }
 
     async fn open_log(path: &Path) -> Result<File> {
@@ -108,10 +164,10 @@ impl LogFile {
         self.stats.lock().await.record(&log_event);
         let line = serde_json::to_string(&log_event)? + "\n";
         let mut writer = self.writer.lock().await;
-        if writer.size + line.len() as u64 > self.max_bytes {
+        if writer.size + line.len() as u64 > writer.max_bytes {
             writer.file.flush().await?;
             LogFile::log_file_rotate(&self.path).await?;
-            LogFile::prune_rotated_logs(&self.path, self.max_rotated).await?;
+            LogFile::prune_rotated_logs(&self.path, writer.max_rotated).await?;
             writer.file = LogFile::open_log(&self.path).await?;
             writer.size = 0;
         }

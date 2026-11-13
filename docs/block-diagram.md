@@ -17,6 +17,7 @@ flowchart TD
                 Upload["POST /api/upload"]
                 Content["GET /api/content/{id}"]
                 Stats["GET /api/stats"]
+                Limits["GET /api/limits"]
                 Admin["/api/admin/* (session cookie)"]
             end
 
@@ -30,6 +31,7 @@ flowchart TD
                 Logger["Log writer"]
                 Counters["In-memory stats counters"]
                 Creds["Admin credential store"]
+                Settings["Settings store"]
             end
         end
     end
@@ -42,6 +44,7 @@ flowchart TD
     Headers --> Upload
     Headers --> Content
     Headers --> Stats
+    Headers --> Limits
     Headers --> Admin
 
     Admin --> Creds
@@ -49,10 +52,13 @@ flowchart TD
     Admin --> Limit
     Admin --> Logger
     Creds --> AdminFiles
+    Admin --> Settings
+    Settings --> AdminFiles
 
     Pages --> HtmlFiles
     Pages --> Logger
 
+    Upload --> Settings
     Upload --> Limit
     Upload --> Store
     Upload --> Logger
@@ -62,6 +68,8 @@ flowchart TD
 
     Stats --> Store
     Stats --> Counters
+
+    Limits --> Settings
 
     Cleanup --> Store
     Cleanup --> Limit
@@ -76,9 +84,9 @@ flowchart TD
     classDef state fill:#1a1a1a,stroke:#00ff99,stroke-width:2px,color:#cdd6f4
 
     class Client,Proxy,HtmlFiles,LogFiles,AdminFiles external
-    class Headers,Pages,Upload,Content,Stats,Admin web
+    class Headers,Pages,Upload,Content,Stats,Limits,Admin web
     class Cleanup task
-    class Store,Limit,Logger,Counters,Creds state
+    class Store,Limit,Logger,Counters,Creds,Settings state
 
     style Overview fill:#1a1a1a,stroke:#33ccff,stroke-width:2px,color:#33ccff
     style Process fill:#1e1e2e,stroke:#a6adc8,stroke-width:2px,color:#cdd6f4
@@ -94,5 +102,6 @@ flowchart TD
 - The web server and the cleanup loop use the same shared state.
 - Assets, rate limits, and stats counters live only in memory and are lost on restart.
 - `/api/stats` reads memory only. The log files are written but never read back.
-- The client address comes from `X-Forwarded-For` only when the request arrives from a proxy in `TRUSTED_PROXIES`.
-- Admin credentials and the session key are the only state kept on disk besides logs; everything else is lost on restart.
+- The client address comes from `X-Forwarded-For` only when the request arrives from a proxy listed in `trusted_proxies`.
+- Settings are loaded from `data/admin/settings.json` at startup and changed through `/api/admin/settings`; uploads, the rate limiter, and the log writer read the current values.
+- Admin credentials, the session key, and the settings are the only state kept on disk besides logs; everything else is lost on restart.

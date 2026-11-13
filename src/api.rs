@@ -1,15 +1,18 @@
-use actix_web::{HttpRequest, HttpResponse, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, get, http::header, mime, post, web};
 use base64::{Engine, engine::general_purpose};
+use futures::StreamExt;
 
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{ALLOWED_CONTENT_TYPES, CONTENT_CSP, MAX_ASSET_DURATION, MIN_ASSET_DURATION};
+use crate::{ALLOWED_CONTENT_TYPES, CONTENT_CSP};
 use crate::{
-    MAX_ASSET_SIZE_BYTES,
     data_mgt::{AppState, Asset},
     logs::LogEventType,
 };
+
+/// Room for the JSON fields around the content (`duration`, `content_type`, ...).
+const UPLOAD_JSON_OVERHEAD_BYTES: usize = 1024;
 
 #[derive(Deserialize, Debug)]
 pub struct UploadRequest {
@@ -18,14 +21,62 @@ pub struct UploadRequest {
     content: String, // text or base64 string
 }
 
+/// Reads the request body, stopping as soon as it grows past `limit` bytes.
+/// `None` means the body was too large.
+async fn read_body_limited(
+    mut payload: web::Payload,
+    limit: usize,
+) -> Result<Option<web::BytesMut>, actix_web::Error> {
+    let mut body = web::BytesMut::new();
+    while let Some(chunk) = payload.next().await {
+        let chunk = chunk?;
+        if body.len() + chunk.len() > limit {
+            return Ok(None);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Some(body))
+}
+
 #[post("/api/upload")]
 async fn api_upload(
     req: HttpRequest,
-    body: web::Json<UploadRequest>,
+    payload: web::Payload,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     let uploader_ip = crate::client_ip(&req)
         .ok_or_else(|| actix_web::error::ErrorBadRequest("Cannot determine client ip"))?;
+    // One snapshot for the whole request, so a concurrent settings change cannot mix limits.
+    let settings = app_state.settings.get();
+
+    // The body is read by hand instead of with `web::Json`, because the JSON size limit
+    // of `JsonConfig` is fixed at startup while the asset size limit can change at runtime.
+    let is_json = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|mime| mime.essence_str() == mime::APPLICATION_JSON.essence_str());
+    if !is_json {
+        return Ok(HttpResponse::UnsupportedMediaType()
+            .json(json!({ "error": "Content-Type must be application/json" })));
+    }
+    // Base64 and JSON escaping make the body larger than the decoded asset.
+    let body_limit = settings
+        .max_asset_size_bytes
+        .saturating_mul(2)
+        .saturating_add(UPLOAD_JSON_OVERHEAD_BYTES);
+    let Some(raw_body) = read_body_limited(payload, body_limit).await? else {
+        return Ok(HttpResponse::PayloadTooLarge().json(json!({ "error": "Asset too large" })));
+    };
+    let body: UploadRequest = match serde_json::from_slice(&raw_body) {
+        Ok(body) => body,
+        Err(_) => {
+            return Ok(
+                HttpResponse::BadRequest().json(json!({ "error": "Invalid upload request" }))
+            );
+        }
+    };
 
     if !ALLOWED_CONTENT_TYPES.contains(&body.content_type.as_str()) {
         return Ok(HttpResponse::UnsupportedMediaType()
@@ -46,7 +97,7 @@ async fn api_upload(
         }
     };
 
-    if content_bytes.len() > MAX_ASSET_SIZE_BYTES {
+    if content_bytes.len() > settings.max_asset_size_bytes {
         let error = json!({"error": "Asset too large"});
         app_state
             .log_file
@@ -59,7 +110,10 @@ async fn api_upload(
         })));
     }
 
-    let clamped_duration = body.duration.clamp(MIN_ASSET_DURATION, MAX_ASSET_DURATION);
+    let clamped_duration = body.duration.clamp(
+        settings.min_asset_duration_minutes,
+        settings.max_asset_duration_minutes,
+    );
     let asset = crate::data_mgt::Asset::new(
         clamped_duration,
         body.content_type.clone(),
@@ -71,7 +125,11 @@ async fn api_upload(
     let asset_expiration_time = asset.expires_at();
     let (allowed, retry_after_ms) = app_state
         .connection_tracker
-        .check(&uploader_ip, asset_expiration_time)
+        .check(
+            &uploader_ip,
+            asset_expiration_time,
+            settings.max_uploads_per_ip,
+        )
         .await;
     if !allowed {
         let retry_after_seconds = retry_after_ms.map(|ms| ((ms + 999) / 1000).max(1));
@@ -89,7 +147,7 @@ async fn api_upload(
 
     match app_state
         .assets
-        .add_asset(asset.clone(), &app_state.log_file)
+        .add_asset(asset.clone(), &settings, &app_state.log_file)
         .await
     {
         Ok(_) => {
@@ -139,6 +197,17 @@ async fn api_get_asset(
             .insert_header(("Content-Security-Policy", CONTENT_CSP))
             .body(asset.content())),
     }
+}
+
+/// Public upload limits, so the upload page can build its controls from the settings.
+#[get("/api/limits")]
+async fn api_limits(app_state: web::Data<AppState>) -> HttpResponse {
+    let settings = app_state.settings.get();
+    HttpResponse::Ok().json(json!({
+        "min_duration_minutes": settings.min_asset_duration_minutes,
+        "max_duration_minutes": settings.max_asset_duration_minutes,
+        "max_asset_size_bytes": settings.max_asset_size_bytes,
+    }))
 }
 
 #[derive(serde::Serialize)]

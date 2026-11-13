@@ -3,6 +3,7 @@ mod api;
 mod auth;
 mod data_mgt;
 mod logs;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -19,7 +20,7 @@ use mime_guess::from_path;
 use serde_json::Value;
 use std::{
     env, fs,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -29,15 +30,10 @@ pub static LOG_DIR: &str = "data/logs/";
 // Admin secrets live outside data/html/ so they can never be served as static files.
 pub static ADMIN_CREDENTIALS_FILE: &str = "data/admin/credentials.json";
 pub static SESSION_KEY_FILE: &str = "data/admin/session.key";
+pub static SETTINGS_FILE: &str = "data/admin/settings.json";
 pub static LOG_FILE_NAME: &str = "log.txt";
-pub static MAX_LOG_FILE_BYTES: u64 = 50 * 1024 * 1024; // 50 MB, then rotate while running
-pub static MAX_ROTATED_LOGS: usize = 10; // older rotated logs are deleted
-pub static MIN_ASSET_DURATION: u32 = 1; // in minutes
-pub static MAX_ASSET_DURATION: u32 = 60; // in minutes
-pub static MAX_ASSETS: usize = 1000;
-pub static MAX_ASSET_SIZE_BYTES: usize = 3 * 1024 * 1024; // 3 MB
-pub static MAX_TOTAL_STORAGE_BYTES: usize = 512 * 1024 * 1024; // 512 MB across all assets
-pub static MAX_UPLOADS_PER_USER: usize = 10;
+// Limits and bind address now live in SETTINGS_FILE; these variables are no longer read.
+static IGNORED_ENV_VARS: &[&str] = &["BIND_ADDR", "BIND_PORT", "TRUSTED_PROXIES"];
 
 // SVG and HTML are excluded on purpose: both can run scripts when opened directly.
 pub static ALLOWED_CONTENT_TYPES: &[&str] = &[
@@ -70,31 +66,6 @@ pub static HTML_VARS: LazyLock<Vec<(&str, &str)>> = LazyLock::new(|| {
     ]
 });
 
-pub static BIND_ADDR: LazyLock<String> = LazyLock::new(|| match env::var("BIND_ADDR") {
-    Ok(addr) => {
-        println!("Binding to address: {}", addr);
-        addr.parse().unwrap_or("127.0.0.1".to_string())
-    }
-    Err(_) => {
-        println!("Binding to default address: 0.0.0.0");
-        "0.0.0.0".to_string()
-    }
-});
-pub static BIND_PORT: LazyLock<u16> = LazyLock::new(|| match env::var("BIND_PORT") {
-    Ok(port_str) => {
-        println!("Binding to port: {}", port_str);
-        port_str.parse().unwrap_or(8080)
-    }
-    Err(_) => {
-        println!("Binding to default port: 8080");
-        8080
-    }
-});
-
-// Comma-separated proxy IPs allowed to report the client address via X-Forwarded-For.
-pub static TRUSTED_PROXIES: LazyLock<Vec<IpAddr>> =
-    LazyLock::new(|| parse_trusted_proxies(&env::var("TRUSTED_PROXIES").unwrap_or_default()));
-
 pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
     fs::read_dir(HTML_DIR)
         .unwrap()
@@ -107,7 +78,7 @@ pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
 });
 
 use crate::{
-    api::{api_get_asset, api_stats, api_upload},
+    api::{api_get_asset, api_limits, api_stats, api_upload},
     data_mgt::AppState,
     logs::{LogEventType, LogFile},
 };
@@ -198,9 +169,16 @@ async fn catch_all(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let log_file = LogFile::new(format!("{}{}", LOG_DIR, LOG_FILE_NAME))
-        .await
-        .expect("Failed to create or open log file");
+    warn_ignored_env_vars();
+    let settings = settings::SettingsStore::load(SETTINGS_FILE).await?;
+    let startup = settings.running().clone();
+
+    let log_file = LogFile::with_limits(
+        format!("{}{}", LOG_DIR, LOG_FILE_NAME),
+        logs::LogLimits::from(&startup),
+    )
+    .await
+    .expect("Failed to create or open log file");
 
     let admin = auth::CredentialStore::load(ADMIN_CREDENTIALS_FILE).await?;
     if !admin.is_configured().await {
@@ -209,6 +187,7 @@ async fn main() -> Result<()> {
     let session_settings = admin::SessionSettings {
         key: auth::load_or_create_session_key(Path::new(SESSION_KEY_FILE)).await?,
         cookie_secure: admin_cookie_secure()?,
+        max_age_secs: startup.admin_session_max_age_secs(),
     };
 
     let app_state = data_mgt::AppState {
@@ -216,9 +195,11 @@ async fn main() -> Result<()> {
         connection_tracker: data_mgt::RateLimiter::default(),
         log_file,
         admin,
+        settings,
     };
 
-    println!("Starting server at http://{}:{}/", *BIND_ADDR, *BIND_PORT);
+    let bind = (startup.bind_addr, startup.bind_port);
+    println!("Starting server at http://{}/", SocketAddr::from(bind));
 
     let inner_app_state = app_state.clone();
     tokio::spawn(async move {
@@ -236,7 +217,7 @@ async fn main() -> Result<()> {
             .app_data(web::Data::new(app_state.clone()))
             .configure(|cfg| configure_routes(cfg, &session_settings))
     })
-    .bind((BIND_ADDR.clone(), *BIND_PORT))?
+    .bind(bind)?
     .run()
     .await?;
     Ok(())
@@ -252,14 +233,13 @@ fn security_headers() -> DefaultHeaders {
 }
 
 fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::SessionSettings) {
-    // Uploaded images are sent as base64 inside JSON, which is larger than the decoded asset.
-    cfg.app_data(web::JsonConfig::default().limit(MAX_ASSET_SIZE_BYTES * 2))
-        .service(index)
+    cfg.service(index)
         .service(stats)
         .service(admin_page)
         .service(view_asset)
         .service(api_get_asset)
         .service(api_upload)
+        .service(api_limits)
         .service(api_stats);
     // Must be registered before the catch-all, which matches every path.
     admin::configure(cfg, session_settings);
@@ -278,17 +258,23 @@ fn admin_cookie_secure() -> Result<bool> {
     }
 }
 
-fn parse_trusted_proxies(value: &str) -> Vec<IpAddr> {
-    value
-        .split(',')
-        .filter_map(|entry| entry.trim().parse().ok())
-        .collect()
+fn warn_ignored_env_vars() {
+    for name in IGNORED_ENV_VARS {
+        if env::var_os(name).is_some() {
+            eprintln!("Warning: {name} is ignored; set it in the admin panel ({SETTINGS_FILE}).");
+        }
+    }
 }
 
 /// Client address for rate limiting and logs. Forwarding headers count only when the
 /// TCP peer is a trusted proxy, because any other client can set them to anything.
 pub fn client_ip(req: &HttpRequest) -> Option<String> {
-    resolve_client_ip(req, &TRUSTED_PROXIES)
+    // Without the app state no proxy is trusted, so headers can never be spoofed.
+    let trusted = req
+        .app_data::<web::Data<AppState>>()
+        .map(|state| state.settings.get().trusted_proxies)
+        .unwrap_or_default();
+    resolve_client_ip(req, &trusted)
 }
 
 fn resolve_client_ip(req: &HttpRequest, trusted: &[IpAddr]) -> Option<String> {

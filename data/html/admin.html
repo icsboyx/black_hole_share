@@ -202,6 +202,60 @@
       margin-bottom: 0;
     }
 
+    .settings-group {
+      margin-top: 18px;
+    }
+
+    .settings-group h3 {
+      color: var(--text-secondary);
+      font-size: 0.85em;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0 0 10px 0;
+    }
+
+    .settings-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .settings-grid .form-row {
+      margin-bottom: 0;
+    }
+
+    .settings-grid .form-row.wide {
+      grid-column: span 2;
+    }
+
+    .field-error {
+      color: #ff6666;
+      font-size: 0.8em;
+      min-height: 1em;
+    }
+
+    .restart-tag {
+      color: var(--accent-cyan);
+      font-size: 0.8em;
+    }
+
+    .settings-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    @media (max-width: 700px) {
+      .settings-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .settings-grid .form-row.wide {
+        grid-column: auto;
+      }
+    }
+
     [hidden] {
       display: none !important;
     }  </style>
@@ -273,6 +327,20 @@
           <div class="table-wrap" id="assetsTable"></div>
         </div>
 
+        <div class="panel" id="settingsPanel">
+          <h2>Settings</h2>
+          <p class="hint">Saved to data/admin/settings.json. Fields marked <span class="restart-tag">restart</span>
+            take effect after the server restarts; all others apply immediately.</p>
+          <form id="settingsForm" novalidate>
+            <div id="settingsFields"></div>
+            <p id="settingsMessage" class="message"></p>
+            <div class="settings-actions">
+              <button id="settingsReset" class="small-btn" type="button">Discard changes</button>
+              <button class="small-btn" type="submit">Save settings</button>
+            </div>
+          </form>
+        </div>
+
         <div class="panel">
           <h2>Change password</h2>
           <p class="hint">Changing the password logs out every other session.</p>
@@ -316,6 +384,7 @@
       if (viewId === "dashboardView") {
         setMessage("assetsMessage", "");
         setMessage("passwordMessage", "");
+        setMessage("settingsMessage", "");
         refreshTimer = setInterval(loadDashboard, 30000);
       }
       // Login state may have changed: let the admin bar show or hide itself.
@@ -418,7 +487,8 @@
         show("loginView");
       } else {
         show("dashboardView");
-        await loadDashboard();
+        // Settings load once per login; the periodic refresh must not overwrite edits.
+        await Promise.all([loadDashboard(), loadSettings()]);
       }
     }
 
@@ -486,6 +556,157 @@
       );
     }
 
+    const MIB = 1024 * 1024;
+    // kind: "int" (whole number), "mib" (bytes shown in MiB), "ip" (one address),
+    // "ips" (comma-separated addresses).
+    const SETTING_GROUPS = [
+      {
+        title: "Uploads",
+        fields: [
+          { name: "min_asset_duration_minutes", label: "Min duration (minutes)", kind: "int" },
+          { name: "max_asset_duration_minutes", label: "Max duration (minutes, up to 1440)", kind: "int" },
+          { name: "max_uploads_per_ip", label: "Active uploads per IP", kind: "int" },
+          { name: "max_asset_size_bytes", label: "Max asset size (MiB, up to 100)", kind: "mib" },
+          { name: "max_total_storage_bytes", label: "Total in-memory storage (MiB)", kind: "mib" },
+          { name: "max_assets", label: "Max active assets", kind: "int" },
+        ],
+      },
+      {
+        title: "Logs",
+        fields: [
+          { name: "max_log_file_bytes", label: "Rotate log at (MiB, at least 1)", kind: "mib" },
+          { name: "max_rotated_logs", label: "Rotated logs to keep", kind: "int" },
+          { name: "max_recent_activity", label: "Recent activity entries", kind: "int" },
+        ],
+      },
+      {
+        title: "Network",
+        hint: "If you change the address or port, update the container port mapping (-p) too, " +
+          "or the server will be unreachable after the restart.",
+        fields: [
+          { name: "bind_addr", label: "Bind address", kind: "ip" },
+          { name: "bind_port", label: "Bind port", kind: "int" },
+          { name: "trusted_proxies", label: "Trusted proxies (comma-separated IPs)", kind: "ips", wide: true },
+        ],
+      },
+      {
+        title: "Admin",
+        fields: [
+          { name: "admin_session_max_age_minutes", label: "Session lifetime (minutes)", kind: "int" },
+        ],
+      },
+    ];
+    const SETTING_FIELDS = SETTING_GROUPS.flatMap((group) => group.fields);
+    let loadedSettings = null;
+
+    function buildSettingsForm(restartFields) {
+      const groups = SETTING_GROUPS.map((group) => {
+        const rows = group.fields.map((field) => {
+          const input = el("input", { id: `setting-${field.name}`, name: field.name });
+          if (field.kind === "int") {
+            Object.assign(input, { type: "number", step: "1", min: "0" });
+          } else if (field.kind === "mib") {
+            Object.assign(input, { type: "number", step: "any", min: "0" });
+          } else {
+            Object.assign(input, { type: "text", spellcheck: false });
+          }
+          const label = el("label", { htmlFor: input.id }, field.label);
+          if (restartFields.includes(field.name)) {
+            label.append(" ", el("span", { className: "restart-tag" }, "restart"));
+          }
+          return el(
+            "div",
+            { className: field.wide ? "form-row wide" : "form-row" },
+            label,
+            input,
+            el("span", { className: "field-error", id: `error-${field.name}` })
+          );
+        });
+        return el(
+          "div",
+          { className: "settings-group" },
+          el("h3", {}, group.title),
+          ...(group.hint ? [el("p", { className: "hint" }, group.hint)] : []),
+          el("div", { className: "settings-grid" }, ...rows)
+        );
+      });
+      document.getElementById("settingsFields").replaceChildren(...groups);
+    }
+
+    function fillSettingsForm(settings) {
+      for (const field of SETTING_FIELDS) {
+        const value = settings[field.name];
+        const input = document.getElementById(`setting-${field.name}`);
+        if (field.kind === "mib") {
+          input.value = String(parseFloat((value / MIB).toFixed(6)));
+        } else if (field.kind === "ips") {
+          input.value = value.join(", ");
+        } else {
+          input.value = String(value);
+        }
+      }
+      clearFieldErrors();
+    }
+
+    function clearFieldErrors() {
+      for (const field of SETTING_FIELDS) {
+        document.getElementById(`error-${field.name}`).textContent = "";
+      }
+    }
+
+    function showFieldError(name, message) {
+      const target = document.getElementById(`error-${name}`);
+      if (target) target.textContent = message;
+    }
+
+    // Reads the form into the JSON the server expects. Type errors are caught here;
+    // ranges are checked by the server, which is the only place that enforces them.
+    function readSettingsForm() {
+      const settings = {};
+      let ok = true;
+      for (const field of SETTING_FIELDS) {
+        const raw = document.getElementById(`setting-${field.name}`).value.trim();
+        if (field.kind === "int" || field.kind === "mib") {
+          const number = raw === "" ? NaN : Number(raw);
+          const value = field.kind === "mib" ? Math.round(number * MIB) : number;
+          if (!Number.isSafeInteger(value) || value < 0) {
+            showFieldError(field.name, field.kind === "mib" ? "must be a positive number" : "must be a whole number");
+            ok = false;
+            continue;
+          }
+          settings[field.name] = value;
+        } else if (field.kind === "ips") {
+          settings[field.name] = raw === "" ? [] : raw.split(",").map((ip) => ip.trim()).filter(Boolean);
+        } else {
+          settings[field.name] = raw;
+        }
+      }
+      return ok ? settings : null;
+    }
+
+    function showRestartPending(data) {
+      if (data.restart_pending.length === 0) return;
+      const details = data.restart_pending.map((name) => `${name} (running: ${data.running[name]})`);
+      setMessage("settingsMessage", `Restart the server to apply: ${details.join(", ")}.`, "ok");
+    }
+
+    async function loadSettings() {
+      const result = await api("/settings");
+      if (result.response.status === 401) {
+        show("loginView");
+        return;
+      }
+      if (!result.response.ok) {
+        setMessage("settingsMessage", errorText(result, "Failed to load settings"));
+        return;
+      }
+      if (!loadedSettings) buildSettingsForm(result.data.restart_fields);
+      loadedSettings = result.data.current;
+      fillSettingsForm(loadedSettings);
+      setMessage("settingsMessage", "");
+      showRestartPending(result.data);
+    }
+
     async function deleteAsset(id) {
       if (!confirm(`Delete asset ${id}?`)) return;
       const result = await api(`/assets/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -550,6 +771,36 @@
       } else {
         setMessage("passwordMessage", errorText(result, "Password change failed"));
       }
+    });
+
+    document.getElementById("settingsForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      clearFieldErrors();
+      const settings = readSettingsForm();
+      if (!settings) {
+        setMessage("settingsMessage", "Fix the marked fields.");
+        return;
+      }
+      const result = await api("/settings", { method: "PUT", body: settings });
+      if (result.response.ok) {
+        loadedSettings = result.data.current;
+        fillSettingsForm(loadedSettings);
+        setMessage("settingsMessage", "Settings saved.", "ok");
+        showRestartPending(result.data);
+        await loadDashboard();
+      } else if (result.response.status === 401) {
+        show("loginView");
+      } else {
+        for (const error of (result.data && result.data.fields) || []) {
+          showFieldError(error.field, error.message);
+        }
+        setMessage("settingsMessage", errorText(result, "Saving settings failed"));
+      }
+    });
+
+    document.getElementById("settingsReset").addEventListener("click", () => {
+      if (loadedSettings) fillSettingsForm(loadedSettings);
+      setMessage("settingsMessage", "");
     });
 
     document.getElementById("refreshBtn").addEventListener("click", loadDashboard);
