@@ -80,6 +80,12 @@ impl UploadRequest {
     pub fn files_left(&self) -> Option<u32> {
         self.max_files.map(|max| max.saturating_sub(self.uploads))
     }
+
+    /// Whether the link still accepts files: not expired, and neither the file count nor
+    /// the total size is used up.
+    pub fn is_open(&self, now: i64) -> bool {
+        !self.is_expired(now) && self.files_left() != Some(0) && self.bytes_left() != Some(0)
+    }
 }
 
 /// What the admin asks for when creating a request.

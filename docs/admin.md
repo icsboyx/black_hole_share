@@ -20,10 +20,13 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 
 ## Features
 
-- Usage cards: active assets, storage, totals since startup
+- Overview in two sections, each with usage cards and tables:
+  - **Public sharing**: active assets, memory used, uploads and deletions since startup; active uploads by IP; active assets with early deletion
+  - **File services**: shared files, received files, disk used against the budget; shared files with size, downloads, encryption, and expiry, with early deletion; upload requests with their status (open, full, expired), files and bytes received, and closing time, with deletion (files already received stay)
+  - the number of HTTP requests since the server started
 - Active uploads grouped by uploader IP
 - Active assets with type, size, uploader IP, and time left, with early deletion (the uploader's slot in the per-IP limit is freed)
-- Tabs: **Overview** (usage, uploads by IP, active assets, shared file storage), **Settings**, **Account** (password change); the tab is kept in the URL (`/admin#settings`)
+- Tabs: **Overview**, **Settings**, **Account** (password change); the tab is kept in the URL (`/admin#settings`)
 - Settings: one section per type (Public uploads, Files, Logs, Network, Address & HTTPS, Abuse limits, Admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
 - **Server** card with the [Restart](#restart) button
 - The admin bar on every page links the services first (Upload, Files) and then Stats and Admin

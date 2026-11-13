@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-13
+
+### Changed
+
+- The admin overview has two sections, **Public sharing** and **File services**, each with its own cards and tables. File services shows shared files, received files, disk used against the budget, a table of shared files, and a table of upload requests with their status; both tables have a **Delete** button, as the active assets do. The HTTP request count moved to a line above the sections.
+- `GET /api/admin/stats` also returns `shared_files`, `shared_bytes`, `received_files`, `received_bytes`, `requests`, and `open_requests`.
+
+### Fixed
+
+- The overview counted files received through upload requests as shared files.
+- Stat cards are stacked on phone screens instead of overflowing the page.
+
 ## [2.1.0] - 2026-11-13
 
 ### Added

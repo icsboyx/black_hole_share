@@ -893,6 +893,34 @@ h1 .home-link:hover {
   color: var(--text-secondary);
 }
 
+/* Server-wide facts on the left of the toolbar, the buttons on the right. */
+.toolbar-info {
+  margin-right: auto;
+  font-size: 0.9em;
+}
+
+/* Section titles of the admin overview: public sharing, file services. */
+.overview-title {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  color: var(--text-primary);
+  font-size: 1.05em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin: 32px 0 0 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.overview-link {
+  margin-left: auto;
+  font-size: 0.8em;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--accent-cyan);
+}
+
 .small-btn {
   background-color: var(--border-color);
   color: var(--bg-tertiary);
@@ -1601,6 +1629,12 @@ td a:hover {
 @media (max-width: 600px) {
   .page-column {
     padding: 14px 16px;
+  }
+
+  /* One card per row: three side by side do not fit a phone. */
+  .stats-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 
   h1 {

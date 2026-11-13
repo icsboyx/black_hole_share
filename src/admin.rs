@@ -335,6 +335,10 @@ async fn stats(
     let log_stats = app_state.log_file.stats().await;
     let settings = app_state.settings.get();
     let (file_count, file_bytes) = app_state.files.usage().await;
+    let file_usage = app_state.files.usage_by_kind().await;
+    let requests = app_state.requests.list().await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let open_requests = requests.iter().filter(|r| r.is_open(now)).count();
 
     let mut by_ip: HashMap<String, UploaderStats> = HashMap::new();
     for asset in &assets {
@@ -358,6 +362,12 @@ async fn stats(
         "files": file_count,
         "files_bytes": file_bytes,
         "max_files_bytes": settings.max_files_total_bytes,
+        "shared_files": file_usage.shared_files,
+        "shared_bytes": file_usage.shared_bytes,
+        "received_files": file_usage.received_files,
+        "received_bytes": file_usage.received_bytes,
+        "requests": requests.len(),
+        "open_requests": open_requests,
         "total_uploads": log_stats.total_uploads,
         "total_deleted": log_stats.total_deleted,
         "total_requests": log_stats.total_requests,

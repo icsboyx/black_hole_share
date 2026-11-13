@@ -141,7 +141,7 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `POST` | `/password` | yes | `{ "current_password", "new_password" }`; `403` if the current password is wrong |
 | `GET` | `/assets` | yes | Active assets |
 | `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
-| `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
+| `GET` | `/stats` | yes | Usage, limits, and active uploads per IP. Files on disk: `files` and `files_bytes` (all), `shared_files`, `shared_bytes`, `received_files`, `received_bytes`; upload requests: `requests` and `open_requests` (not expired, not full) |
 | `GET` | `/settings` | yes | `current` (saved), `running` (in use since startup), and `defaults` settings, `restart_fields`, and `restart_pending` |
 | `POST` | `/files?name=&duration_minutes=&max_downloads=&valid_from=&encrypt=` | yes | Raw file bytes as the body, `Content-Length` required (`411` without it). `duration_minutes` counts from `valid_from` (Unix ms) when given. With `encrypt=true` the file is encrypted and the response includes its `key`, returned only here. `201` with the file and its `link`; `400` invalid input or a body that does not match its length, `413` over `max_file_size_bytes`, `507` over `max_files_total_bytes` (encrypted files count 16 bytes more per 64 KiB), `409` when the encryption keys do not exist yet (log in again) |
 | `GET` | `/files` | yes | Shared files that have not expired, with downloads, `encrypted`, and `link` |

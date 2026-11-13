@@ -71,10 +71,13 @@
         <div id="tab-overview" role="tabpanel" aria-labelledby="tabBtn-overview">
           <!-- User name and Log out live in the admin bar (nav.js). -->
           <div class="toolbar">
+            <span id="serverInfo" class="toolbar-info"></span>
             <button id="refreshBtn" class="small-btn" type="button">Refresh</button>
           </div>
+          <p id="assetsMessage" class="message"></p>
 
-          <div id="statsGrid" class="stats-grid"></div>
+          <h2 class="overview-title">Public sharing</h2>
+          <div id="publicGrid" class="stats-grid"></div>
 
           <div class="panel">
             <h2>Active uploads by IP</h2>
@@ -83,8 +86,20 @@
 
           <div class="panel">
             <h2>Active assets</h2>
-            <p id="assetsMessage" class="message"></p>
             <div class="table-wrap" id="assetsTable"></div>
+          </div>
+
+          <h2 class="overview-title">File services <a class="overview-link" href="/files">Open Files</a></h2>
+          <div id="filesGrid" class="stats-grid"></div>
+
+          <div class="panel">
+            <h2>Shared files</h2>
+            <div class="table-wrap" id="sharedFilesTable"></div>
+          </div>
+
+          <div class="panel">
+            <h2 id="requestsTitle">Upload requests</h2>
+            <div class="table-wrap" id="requestsTable"></div>
           </div>
         </div>
 
@@ -201,36 +216,113 @@
     }
 
     async function loadDashboard() {
-      const [stats, assets] = await Promise.all([api("/stats"), api("/assets")]);
-      if (stats.response.status === 401 || assets.response.status === 401) {
+      const [stats, assets, files, requests] =
+        await Promise.all([api("/stats"), api("/assets"), api("/files"), api("/requests")]);
+      const results = [stats, assets, files, requests];
+      if (results.some((result) => result.response.status === 401)) {
         show("loginView");
         setMessage("loginMessage", "Your session has ended. Please log in again.");
         return;
       }
-      if (!stats.response.ok || !assets.response.ok) {
-        setMessage("assetsMessage", errorText(stats.response.ok ? assets : stats, "Failed to load data"));
+      const failed = results.find((result) => !result.response.ok);
+      if (failed) {
+        setMessage("assetsMessage", errorText(failed, "Failed to load data"));
         return;
       }
       renderStats(stats.data);
       renderUploaders(stats.data.uploaders);
       renderAssets(assets.data);
+      renderSharedFiles(files.data);
+      renderRequests(requests.data, stats.data.open_requests);
+    }
+
+    function statCards(cards) {
+      return cards.map(([label, value]) =>
+        el("div", { className: "stat-card" },
+          el("div", { className: "stat-label" }, label),
+          el("div", { className: "stat-value" }, value))
+      );
     }
 
     function renderStats(stats) {
-      const cards = [
+      document.getElementById("serverInfo").textContent =
+        `${stats.total_requests} HTTP requests since the server started`;
+      document.getElementById("publicGrid").replaceChildren(...statCards([
         ["Active assets", `${stats.active_assets} / ${stats.max_assets}`],
-        ["Storage used", `${formatBytes(stats.storage_bytes)} / ${formatBytes(stats.max_storage_bytes)}`],
-        ["Shared files", `${stats.files} · ${formatBytes(stats.files_bytes)} / ${formatBytes(stats.max_files_bytes)}`],
-        ["Total uploads", stats.total_uploads],
-        ["Total deleted", stats.total_deleted],
-        ["Total requests", stats.total_requests],
-      ];
-      document.getElementById("statsGrid").replaceChildren(
-        ...cards.map(([label, value]) =>
-          el("div", { className: "stat-card" },
-            el("div", { className: "stat-label" }, label),
-            el("div", { className: "stat-value" }, value))
-        )
+        ["Memory used", `${formatBytes(stats.storage_bytes)} / ${formatBytes(stats.max_storage_bytes)}`],
+        ["Since startup", `${stats.total_uploads} uploaded · ${stats.total_deleted} deleted`],
+      ]));
+      document.getElementById("filesGrid").replaceChildren(...statCards([
+        ["Shared files", `${stats.shared_files} · ${formatBytes(stats.shared_bytes)}`],
+        ["Received files", `${stats.received_files} · ${formatBytes(stats.received_bytes)}`],
+        ["Disk used", `${formatBytes(stats.files_bytes)} / ${formatBytes(stats.max_files_bytes)}`],
+      ]));
+    }
+
+    function deleteButton(onClick) {
+      const button = el("button", { className: "small-btn danger", type: "button" }, "Delete");
+      button.addEventListener("click", onClick);
+      return button;
+    }
+
+    function renderSharedFiles(files) {
+      const now = Date.now();
+      const rows = files.map((item) => {
+        const downloads = item.max_downloads === null ? `${item.downloads}` : `${item.downloads} / ${item.max_downloads}`;
+        const opens = item.valid_from !== null && item.valid_from > now ? ` (opens ${formatTime(item.valid_from)})` : "";
+        return el(
+          "tr",
+          {},
+          el("td", {}, el("a", { href: item.link, target: "_blank", rel: "noopener" }, item.name)),
+          el("td", {}, formatBytes(item.size)),
+          el("td", {}, downloads),
+          el("td", {}, item.encrypted ? "Yes" : "No"),
+          el("td", {}, formatTime(item.expires_at) + opens),
+          el("td", {}, deleteButton(() => deleteItem(
+            `/files/${encodeURIComponent(item.id)}`,
+            `Delete "${item.name}"? Its link stops working immediately.`,
+            "File deleted."
+          )))
+        );
+      });
+      document.getElementById("sharedFilesTable").replaceChildren(
+        table(["Name", "Size", "Downloads", "Encrypted", "Expires", ""], rows)
+      );
+    }
+
+    // Same states as the Requests tab of /files.
+    function requestState(item, now) {
+      if (item.files_left === 0 || (item.max_total_bytes !== null && item.received_bytes >= item.max_total_bytes)) return "Full";
+      if (item.expires_at !== null && now >= item.expires_at) return "Expired";
+      return "Open";
+    }
+
+    function renderRequests(requests, openCount) {
+      document.getElementById("requestsTitle").textContent =
+        `Upload requests · ${openCount} open of ${requests.length}`;
+      const now = Date.now();
+      const rows = requests.map((item) => {
+        const size = item.max_total_bytes === null
+          ? formatBytes(item.received_bytes)
+          : `${formatBytes(item.received_bytes)} / ${formatBytes(item.max_total_bytes)}`;
+        const files = item.max_files === null ? `${item.uploads}` : `${item.uploads} / ${item.max_files}`;
+        return el(
+          "tr",
+          {},
+          el("td", {}, el("a", { href: "/files#requests" }, item.title)),
+          el("td", {}, requestState(item, now)),
+          el("td", {}, files),
+          el("td", {}, size),
+          el("td", {}, item.expires_at === null ? "Never" : formatTime(item.expires_at)),
+          el("td", {}, deleteButton(() => deleteItem(
+            `/requests/${encodeURIComponent(item.id)}`,
+            `Delete "${item.title}"? Its link stops accepting files; files already received stay in Received.`,
+            "Request deleted."
+          )))
+        );
+      });
+      document.getElementById("requestsTable").replaceChildren(
+        table(["Title", "Status", "Files", "Received", "Closes", ""], rows)
       );
     }
 
@@ -265,8 +357,6 @@
     }
 
     const TABS = ["overview", "settings", "account"];
-    // kind: "int" (whole number), "mib"/"gib" (bytes shown in MiB/GiB), "ip" (one address),
-    // "ips" (comma-separated addresses).
     // kind: "int" (whole number), "mib"/"gib" (bytes shown in MiB/GiB), "ip" (one address),
     // "ips" (comma-separated addresses). Labels stay short so every row lines up; units and
     // limits go in `unit` and `help`.
@@ -725,11 +815,12 @@
       }
     }
 
-    async function deleteAsset(id) {
-      if (!confirm(`Delete asset ${id}?`)) return;
-      const result = await api(`/assets/${encodeURIComponent(id)}`, { method: "DELETE" });
+    // Deletes an asset, a shared file, or an upload request, then reloads the overview.
+    async function deleteItem(path, question, done) {
+      if (!confirm(question)) return;
+      const result = await api(path, { method: "DELETE" });
       if (result.response.status === 204) {
-        setMessage("assetsMessage", "Asset deleted.", "ok");
+        setMessage("assetsMessage", done, "ok");
       } else if (result.response.status === 401) {
         show("loginView");
         return;
@@ -737,6 +828,10 @@
         setMessage("assetsMessage", errorText(result, "Delete failed"));
       }
       await loadDashboard();
+    }
+
+    function deleteAsset(id) {
+      return deleteItem(`/assets/${encodeURIComponent(id)}`, `Delete asset ${id}?`, "Asset deleted.");
     }
 
     document.getElementById("setupForm").addEventListener("submit", async (event) => {

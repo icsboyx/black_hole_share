@@ -191,6 +191,16 @@ impl fmt::Debug for Decryption {
     }
 }
 
+/// Files on disk by kind, for the admin overview. Sizes are as stored (encrypted files
+/// take a little more than their content).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct FileUsage {
+    pub shared_files: usize,
+    pub shared_bytes: u64,
+    pub received_files: usize,
+    pub received_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileStore {
     dir: PathBuf,
@@ -532,6 +542,22 @@ impl FileStore {
     pub async fn usage(&self) -> (usize, u64) {
         let files = self.files.lock().await;
         (files.len(), files.iter().map(SharedFile::stored_size).sum())
+    }
+
+    /// Like `usage`, split into shared files and files received through upload requests.
+    pub async fn usage_by_kind(&self) -> FileUsage {
+        let files = self.files.lock().await;
+        let mut usage = FileUsage::default();
+        for file in files.iter() {
+            if file.is_shared() {
+                usage.shared_files += 1;
+                usage.shared_bytes += file.stored_size();
+            } else {
+                usage.received_files += 1;
+                usage.received_bytes += file.stored_size();
+            }
+        }
+        usage
     }
 
     /// Deletes a shared (`received == false`) or received file now. Returns it so the

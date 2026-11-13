@@ -1469,6 +1469,34 @@ macro_rules! new_request {
 }
 
 #[actix_web::test]
+async fn admin_stats_split_shared_and_received_files_and_count_open_requests() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let shared = test::call_service(&app, file_upload(&cookie, "name=a.txt&duration_minutes=5", b"hello").to_request()).await;
+    assert_eq!(shared.status(), StatusCode::CREATED);
+    let one_file = new_request!(&app, &cookie, json!({ "title": "One", "max_files": 1 }));
+    let _open = new_request!(&app, &cookie, json!({ "title": "Open" }));
+    let received = test::call_service(&app, request_upload(&one_file, "name=b.txt", b"abc").to_request()).await;
+    assert_eq!(received.status(), StatusCode::CREATED);
+
+    let stats: Value = test::call_and_read_body_json(&app, admin_get("/api/admin/stats", &cookie).to_request()).await;
+    assert_eq!(stats["shared_files"], 1);
+    assert_eq!(stats["shared_bytes"], 5);
+    assert_eq!(stats["received_files"], 1);
+    // Received files are encrypted: stored a little larger than sent.
+    assert!(stats["received_bytes"].as_u64().unwrap() > 3, "{stats}");
+    assert_eq!(stats["files"], 2);
+    assert_eq!(
+        stats["files_bytes"].as_u64().unwrap(),
+        stats["shared_bytes"].as_u64().unwrap() + stats["received_bytes"].as_u64().unwrap()
+    );
+    // "One" took its only file and is full; "Open" still accepts files.
+    assert_eq!(stats["requests"], 2);
+    assert_eq!(stats["open_requests"], 1);
+}
+
+#[actix_web::test]
 async fn someone_uploads_through_a_request_and_only_the_admin_downloads() {
     let dir = temp_dir();
     let app = test_app!(state_in(&dir).await);
