@@ -22,8 +22,9 @@ use uuid::Uuid;
 
 use crate::{
     auth::AuthError,
+    crypto::{FileKey, unwrap_file_key, wrap_file_key},
     data_mgt::{AppState, log_removed_assets},
-    files::{FileError, NewFile, SharedFile},
+    files::{FileEncryption, FileError, NewFile, SharedFile},
     logs::{LogEventType, LogLimits},
     settings::{FieldError, Settings, UpdateError},
 };
@@ -79,6 +80,7 @@ pub fn configure(cfg: &mut web::ServiceConfig, settings: &SessionSettings) {
             .service(update_settings)
             .service(upload_file)
             .service(list_files)
+            .service(reveal_file_key)
             .service(delete_file),
     );
 }
@@ -337,20 +339,50 @@ struct FileUploadQuery {
     max_downloads: Option<u32>,
     /// Unix time in milliseconds.
     valid_from: Option<i64>,
+    /// Encrypt the file with a new random key, returned once in the response.
+    #[serde(default)]
+    encrypt: bool,
 }
 
+/// A shared file as the admin sees it. The wrapped key stays on the server.
 #[derive(Serialize)]
 struct AdminFileItem {
-    #[serde(flatten)]
-    file: SharedFile,
+    id: Uuid,
+    name: String,
+    size: u64,
+    created_at: i64,
+    valid_from: Option<i64>,
+    expires_at: i64,
+    max_downloads: Option<u32>,
+    downloads: u32,
+    encrypted: bool,
     link: String,
+    /// Only in the upload response of an encrypted file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 impl From<SharedFile> for AdminFileItem {
     fn from(file: SharedFile) -> Self {
-        let link = format!("/f/{}", file.id);
-        Self { file, link }
+        Self {
+            id: file.id,
+            link: format!("/f/{}", file.id),
+            encrypted: file.is_encrypted(),
+            name: file.name,
+            size: file.size,
+            created_at: file.created_at,
+            valid_from: file.valid_from,
+            expires_at: file.expires_at,
+            max_downloads: file.max_downloads,
+            downloads: file.downloads,
+            key: None,
+        }
     }
+}
+
+#[derive(Deserialize)]
+struct RevealKeyRequest {
+    password: String,
 }
 
 /// Upload of one file: the raw bytes are the body, the details are in the query string.
@@ -380,6 +412,32 @@ async fn upload_file(
         );
     };
 
+    // The key exists only in memory until the response; on disk it is stored wrapped for
+    // the admin's public key.
+    let key = if query.encrypt {
+        let Some(public_key) = app_state.admin.public_key().await else {
+            return Ok(HttpResponse::Conflict().json(json!({
+                "error": "Encryption keys are not set up yet: log out and log in again"
+            })));
+        };
+        let wrapped = FileKey::generate()
+            .and_then(|key| wrap_file_key(&public_key, &key).map(|wrapped| (key, wrapped)));
+        match wrapped {
+            Ok(pair) => Some(pair),
+            Err(e) => {
+                eprintln!("Cannot create a file key: {e:#}");
+                return Ok(HttpResponse::InternalServerError()
+                    .json(json!({ "error": "Cannot create the encryption key" })));
+            }
+        }
+    } else {
+        None
+    };
+    let encryption = key.as_ref().map(|(key, wrapped)| FileEncryption {
+        key,
+        wrapped: wrapped.clone(),
+    });
+
     let settings = app_state.settings.get();
     let new = NewFile {
         name: query.name,
@@ -387,16 +445,28 @@ async fn upload_file(
         valid_from: query.valid_from,
         max_downloads: query.max_downloads,
     };
-    match app_state.files.add(new, length, payload, &settings).await {
+    match app_state
+        .files
+        .add(new, length, payload, &settings, encryption)
+        .await
+    {
         Ok(file) => {
             log_admin(
                 &app_state,
                 &req,
                 "file_uploaded",
-                json!({ "username": username, "file_id": file.id, "name": file.name, "size": file.size }),
+                json!({
+                    "username": username,
+                    "file_id": file.id,
+                    "name": file.name,
+                    "size": file.size,
+                    "encrypted": file.is_encrypted(),
+                }),
             )
             .await;
-            Ok(HttpResponse::Created().json(AdminFileItem::from(file)))
+            let mut item = AdminFileItem::from(file);
+            item.key = key.map(|(key, _)| key.encode());
+            Ok(HttpResponse::Created().json(item))
         }
         Err(FileError::InvalidInput(message)) => {
             Ok(HttpResponse::BadRequest().json(json!({ "error": message })))
@@ -429,6 +499,61 @@ async fn list_files(
         .map(AdminFileItem::from)
         .collect();
     Ok(HttpResponse::Ok().json(items))
+}
+
+/// Shows the key of an encrypted file again. Needs the admin password, which decrypts the
+/// admin's private key: a stolen session cookie alone does not reveal any key.
+#[post("/files/{id}/key")]
+async fn reveal_file_key(
+    req: HttpRequest,
+    session: Session,
+    path: web::Path<String>,
+    body: web::Json<RevealKeyRequest>,
+    app_state: web::Data<AppState>,
+) -> actix_web::Result<HttpResponse> {
+    let username = require_admin(&session, &app_state).await?;
+    let Ok(id) = Uuid::parse_str(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    let Some(file) = app_state.files.get(&id).await else {
+        return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
+    };
+    let Some(wrapped) = file.wrapped_key.as_ref() else {
+        return Ok(
+            HttpResponse::BadRequest().json(json!({ "error": "This file is not encrypted" }))
+        );
+    };
+    let secret = match app_state.admin.unlock(&body.password).await {
+        Ok(secret) => secret,
+        Err(AuthError::InvalidCredentials) => {
+            log_admin(
+                &app_state,
+                &req,
+                "file_key_reveal_failed",
+                json!({ "username": username, "file_id": file.id }),
+            )
+            .await;
+            return Ok(HttpResponse::Forbidden().json(json!({ "error": "Password is incorrect" })));
+        }
+        Err(e) => return Ok(auth_error_response(e)),
+    };
+    match unwrap_file_key(&secret, wrapped) {
+        Ok(key) => {
+            log_admin(
+                &app_state,
+                &req,
+                "file_key_revealed",
+                json!({ "username": username, "file_id": file.id, "name": file.name }),
+            )
+            .await;
+            Ok(HttpResponse::Ok().json(json!({ "key": key.encode() })))
+        }
+        Err(e) => {
+            eprintln!("Cannot unwrap the key of file {id}: {e:#}");
+            Ok(HttpResponse::InternalServerError()
+                .json(json!({ "error": "Cannot read the file key" })))
+        }
+    }
 }
 
 #[delete("/files/{id}")]

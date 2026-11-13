@@ -111,10 +111,51 @@
       transform: scale(0.99);
     }
 
-    .download-btn[aria-disabled="true"] {
+    button.download-btn {
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 1em;
+    }
+
+    .download-btn[aria-disabled="true"],
+    .download-btn:disabled {
       background-color: var(--inactive-gray);
       color: var(--text-secondary);
       pointer-events: none;
+    }
+
+    .key-form .fact-label {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .key-input {
+      display: block;
+      box-sizing: border-box;
+      width: 100%;
+      margin-bottom: 12px;
+      padding: 11px 12px;
+      background-color: var(--bg-primary);
+      border: 1px solid var(--inactive-gray);
+      border-radius: 10px;
+      color: var(--text-primary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9em;
+      outline: none;
+    }
+
+    .key-input:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 0 3px rgba(51, 204, 255, 0.15);
+    }
+
+    .key-message {
+      min-height: 1.2em;
+      margin: 10px 0 0 0;
+      color: #ff6666;
+      font-size: 0.85em;
+      text-align: center;
     }
 
     .file-note {
@@ -157,6 +198,8 @@
     // What the card currently shows, so the timer only rebuilds it when the state changes.
     let shownWaiting = null;
     let countdown = null;
+    // The key typed so far, kept when the card is rebuilt.
+    let keyValue = "";
 
     // Builds DOM nodes; strings become text nodes, so the file name is never parsed as HTML.
     function el(tag, props = {}, ...children) {
@@ -214,15 +257,10 @@
         ["Downloads left", info.downloads_left === null ? "Unlimited" : info.downloads_left],
       ];
 
-      const button = el("a", { className: "download-btn", href: `/api/files/${encodeURIComponent(fileId)}` }, "Download");
-      button.setAttribute("download", "");
-      if (waiting) button.setAttribute("aria-disabled", "true");
-      // A limited file can disappear after this download: refresh the counter shortly after.
-      button.addEventListener("click", () => setTimeout(load, 1500));
-
-      const note = waiting
+      let note = waiting
         ? `Available from ${formatDate(info.valid_from)}.`
         : `Available until ${formatDate(info.expires_at)}.`;
+      if (info.encrypted) note += " Encrypted: the key was sent to you apart from the link.";
 
       card.replaceChildren(
         el(
@@ -238,9 +276,86 @@
             el("div", { className: "fact" }, el("div", { className: "fact-label" }, label), el("div", { className: "fact-value" }, value))
           )
         ),
-        el("div", { className: "file-actions" }, button, el("p", { className: "file-note" }, note))
+        el("div", { className: "file-actions" }, downloadControls(waiting), el("p", { className: "file-note" }, note))
       );
       countdown = card.querySelector(".fact-value");
+    }
+
+    function downloadControls(waiting) {
+      const url = `/api/files/${encodeURIComponent(fileId)}`;
+      if (!info.encrypted) {
+        const button = el("a", { className: "download-btn", href: url }, "Download");
+        button.setAttribute("download", "");
+        if (waiting) button.setAttribute("aria-disabled", "true");
+        // A limited file can disappear after this download: refresh the counter shortly after.
+        button.addEventListener("click", () => setTimeout(load, 1500));
+        return button;
+      }
+
+      // The key travels in a POST body, never in the URL. A native form submission lets the
+      // browser save the decrypted file straight to disk instead of holding it in memory.
+      const input = el("input", {
+        className: "key-input",
+        id: "fileKey",
+        name: "key",
+        type: "text",
+        placeholder: "Paste the key you received",
+        autocomplete: "off",
+        spellcheck: false,
+        value: keyValue,
+      });
+      input.addEventListener("input", () => {
+        keyValue = input.value;
+      });
+      const button = el("button", { className: "download-btn", type: "submit", disabled: waiting }, "Download");
+      const message = el("p", { className: "key-message", role: "status" });
+      const form = el(
+        "form",
+        { className: "key-form", method: "post", action: url },
+        el("label", { className: "fact-label", htmlFor: "fileKey" }, "Decryption key"),
+        input,
+        button,
+        message
+      );
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        message.textContent = "";
+        if (!input.value.trim()) {
+          message.textContent = "Enter the key.";
+          return;
+        }
+        // Checked first, so a wrong key shows a message here instead of an error page,
+        // and does not use up a download.
+        button.disabled = true;
+        let response;
+        try {
+          response = await fetch(`${url}/check`, { method: "POST", body: new URLSearchParams({ key: input.value }) });
+        } catch {
+          button.disabled = false;
+          message.textContent = "Cannot reach the server. Try again in a moment.";
+          return;
+        }
+        button.disabled = false;
+        if (response.status === 204) {
+          form.submit();
+          setTimeout(load, 1500);
+          return;
+        }
+        if (response.status === 404) {
+          load();
+          return;
+        }
+        let data = null;
+        try {
+          data = await response.json();
+        } catch {
+          // Not JSON: keep the generic message.
+        }
+        message.textContent = response.status === 403 && data && data.error === "Wrong key"
+          ? "Wrong key. Check that you pasted all of it."
+          : (data && data.error) || `Download failed (HTTP ${response.status}).`;
+      });
+      return form;
     }
 
     // Updates only the countdown text, so a click on the button is never lost to a rebuild.

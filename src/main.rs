@@ -1,4 +1,5 @@
 mod admin;
+mod crypto;
 mod api;
 mod auth;
 mod data_mgt;
@@ -80,7 +81,10 @@ pub static STATIC_PAGES: LazyLock<Vec<String>> = LazyLock::new(|| {
 });
 
 use crate::{
-    api::{api_file_download, api_file_info, api_get_asset, api_limits, api_stats, api_upload},
+    api::{
+        api_file_check_key, api_file_download, api_file_download_with_key, api_file_info,
+        api_get_asset, api_limits, api_stats, api_upload,
+    },
     data_mgt::AppState,
     logs::{LogEventType, LogFile},
 };
@@ -272,6 +276,8 @@ fn configure_routes(cfg: &mut web::ServiceConfig, session_settings: &admin::Sess
         .service(file_page)
         .service(api_file_info)
         .service(api_file_download)
+        .service(api_file_check_key)
+        .service(api_file_download_with_key)
         .service(api_get_asset)
         .service(api_upload)
         .service(api_limits)

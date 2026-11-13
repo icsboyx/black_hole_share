@@ -4,7 +4,7 @@
 //! `index.json` lists the files with their limits, so shared files survive a restart.
 
 use std::{
-    fmt::Display,
+    fmt::{self, Display},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -17,10 +17,21 @@ use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{
+    fs,
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+};
 use uuid::Uuid;
 
-use crate::{auth::write_private_file, settings::Settings};
+use crate::{
+    auth::write_private_file,
+    crypto::{
+        ChunkCipher, FileKey, PLAIN_CHUNK_BYTES, TAG_BYTES, WrappedKey, chunk_count,
+        encrypted_size, plain_chunk_len,
+    },
+    settings::Settings,
+};
 
 const INDEX_FILE: &str = "index.json";
 const PART_SUFFIX: &str = ".part";
@@ -42,9 +53,22 @@ pub struct SharedFile {
     /// The file is deleted after this many downloads.
     pub max_downloads: Option<u32>,
     pub downloads: u32,
+    /// Present when the content is encrypted: its key, wrapped for the admin's public key.
+    /// `size` is still the plaintext size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapped_key: Option<WrappedKey>,
 }
 
 impl SharedFile {
+    pub fn is_encrypted(&self) -> bool {
+        self.wrapped_key.is_some()
+    }
+
+    /// Bytes used on disk, which is what the storage budget counts.
+    pub fn stored_size(&self) -> u64 {
+        if self.is_encrypted() { encrypted_size(self.size) } else { self.size }
+    }
+
     pub fn is_expired(&self, now: i64) -> bool {
         now >= self.expires_at
     }
@@ -66,6 +90,12 @@ pub struct NewFile {
     pub duration_minutes: u32,
     pub valid_from: Option<i64>,
     pub max_downloads: Option<u32>,
+}
+
+/// How to encrypt an upload: the new file's key and the same key wrapped for the admin.
+pub struct FileEncryption<'a> {
+    pub key: &'a FileKey,
+    pub wrapped: WrappedKey,
 }
 
 #[derive(Debug)]
@@ -97,12 +127,43 @@ pub enum Download {
     NotYetAvailable {
         valid_from: i64,
     },
+    /// The file is encrypted and no key was given.
+    KeyRequired,
+    /// The key does not decrypt the file. The download is not counted.
+    WrongKey,
     /// The file is open and its download is already counted. When this was the last allowed
     /// download the file is already deleted from disk; the open handle still reads it.
+    /// For an encrypted file the handle is positioned after the first chunk.
     Ready {
-        file: SharedFile,
+        file: Box<SharedFile>,
         handle: fs::File,
+        decryption: Option<Box<Decryption>>,
     },
+}
+
+/// Result of checking a key without downloading.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KeyCheck {
+    NotFound,
+    NotYetAvailable { valid_from: i64 },
+    NotEncrypted,
+    WrongKey,
+    Valid,
+}
+
+/// What is needed to decrypt the rest of a download.
+pub struct Decryption {
+    pub cipher: ChunkCipher,
+    /// The first chunk, decrypted already to check the key.
+    pub first_chunk: Vec<u8>,
+}
+
+impl fmt::Debug for Decryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Decryption")
+            .field("first_chunk_len", &self.first_chunk.len())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -215,14 +276,16 @@ impl FileStore {
         Ok(store)
     }
 
-    /// Streams `body` to disk and adds the file. `length` is the declared Content-Length;
-    /// the space is reserved before writing, so concurrent uploads cannot exceed the budget.
+    /// Streams `body` to disk, encrypting it when `encryption` is given, and adds the file.
+    /// `length` is the declared Content-Length; the space is reserved before writing, so
+    /// concurrent uploads cannot exceed the budget.
     pub async fn add<S, E>(
         &self,
         new: NewFile,
         length: u64,
         mut body: S,
         settings: &Settings,
+        encryption: Option<FileEncryption<'_>>,
     ) -> Result<SharedFile, FileError>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -233,18 +296,23 @@ impl FileStore {
         if length > settings.max_file_size_bytes {
             return Err(FileError::TooLarge);
         }
+        let stored = if encryption.is_some() { encrypted_size(length) } else { length };
         let _reservation = {
             let files = self.files.lock().await;
-            let used: u64 = files.iter().map(|file| file.size).sum();
-            if used + self.reserved.load(Ordering::SeqCst) + length > settings.max_files_total_bytes
+            let used: u64 = files.iter().map(SharedFile::stored_size).sum();
+            if used + self.reserved.load(Ordering::SeqCst) + stored > settings.max_files_total_bytes
             {
                 return Err(FileError::StorageFull);
             }
-            self.reserved.fetch_add(length, Ordering::SeqCst);
+            self.reserved.fetch_add(stored, Ordering::SeqCst);
             Reservation {
                 counter: Arc::clone(&self.reserved),
-                bytes: length,
+                bytes: stored,
             }
+        };
+        let (cipher, wrapped_key) = match encryption {
+            Some(FileEncryption { key, wrapped }) => (Some(ChunkCipher::new(key)), Some(wrapped)),
+            None => (None, None),
         };
 
         let id = Uuid::new_v4();
@@ -252,7 +320,7 @@ impl FileStore {
             path: self.dir.join(format!("{id}{PART_SUFFIX}")),
             keep: false,
         };
-        write_body(&part.path, length, &mut body).await?;
+        write_body(&part.path, length, &mut body, cipher.as_ref()).await?;
         fs::rename(&part.path, content_path(&self.dir, &id)).await?;
         // Renamed: nothing is left at the .part path.
         part.keep = true;
@@ -268,6 +336,7 @@ impl FileStore {
             expires_at,
             max_downloads: new.max_downloads,
             downloads: 0,
+            wrapped_key,
         };
         let mut updated = files.clone();
         updated.push(file.clone());
@@ -280,8 +349,9 @@ impl FileStore {
         Ok(file)
     }
 
-    /// Opens the file for download and counts the download.
-    pub async fn start_download(&self, id: &Uuid) -> Result<Download> {
+    /// Opens the file for download and counts the download. An encrypted file needs its
+    /// key, which is checked by decrypting the first chunk before anything is counted.
+    pub async fn start_download(&self, id: &Uuid, key: Option<&FileKey>) -> Result<Download> {
         let now = Utc::now().timestamp_millis();
         let mut files = self.files.lock().await;
         let Some(index) = files
@@ -301,9 +371,17 @@ impl FileStore {
         }
 
         let path = content_path(&self.dir, id);
-        let handle = fs::File::open(&path)
+        let mut handle = fs::File::open(&path)
             .await
             .with_context(|| format!("cannot open {}", path.display()))?;
+        let decryption = match (file.is_encrypted(), key) {
+            (false, _) => None,
+            (true, None) => return Ok(Download::KeyRequired),
+            (true, Some(key)) => match read_first_chunk(&mut handle, file.size, key).await? {
+                Some(decryption) => Some(Box::new(decryption)),
+                None => return Ok(Download::WrongKey),
+            },
+        };
 
         let mut updated = files.clone();
         updated[index].downloads += 1;
@@ -320,7 +398,44 @@ impl FileStore {
             // Unlinking keeps the open handle readable, so this download still completes.
             remove_if_exists(&path).await;
         }
-        Ok(Download::Ready { file, handle })
+        Ok(Download::Ready {
+            file: Box::new(file),
+            handle,
+            decryption,
+        })
+    }
+
+    /// Checks a key against an encrypted file without counting a download, so the download
+    /// page can report a wrong key before starting the real download.
+    pub async fn check_key(&self, id: &Uuid, key: &FileKey) -> Result<KeyCheck> {
+        let now = Utc::now().timestamp_millis();
+        let Some(file) = self.get(id).await else {
+            return Ok(KeyCheck::NotFound);
+        };
+        if !file.is_available(now) {
+            return Ok(KeyCheck::NotYetAvailable {
+                valid_from: file.valid_from.unwrap_or(now),
+            });
+        }
+        if file.downloads_left() == Some(0) {
+            return Ok(KeyCheck::NotFound);
+        }
+        if !file.is_encrypted() {
+            return Ok(KeyCheck::NotEncrypted);
+        }
+        let path = content_path(&self.dir, id);
+        let mut handle = match fs::File::open(&path).await {
+            Ok(handle) => handle,
+            // Deleted since the lookup: its last download or an admin delete.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(KeyCheck::NotFound),
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot open {}", path.display()));
+            }
+        };
+        Ok(match read_first_chunk(&mut handle, file.size, key).await? {
+            Some(_) => KeyCheck::Valid,
+            None => KeyCheck::WrongKey,
+        })
     }
 
     /// The file if it exists and has not expired, whether or not it is available yet.
@@ -347,7 +462,7 @@ impl FileStore {
     /// Number of stored files and their total size, expired ones included until cleanup.
     pub async fn usage(&self) -> (usize, u64) {
         let files = self.files.lock().await;
-        (files.len(), files.iter().map(|file| file.size).sum())
+        (files.len(), files.iter().map(SharedFile::stored_size).sum())
     }
 
     /// Deletes a file now. Returns it so the caller can log the deletion.
@@ -441,7 +556,79 @@ pub fn clean_file_name(raw: &str) -> Option<String> {
     valid.then(|| name.to_string())
 }
 
-async fn write_body<S, E>(path: &Path, length: u64, body: &mut S) -> Result<(), FileError>
+/// Reads and decrypts the first chunk of an encrypted file. `None` means a wrong key.
+async fn read_first_chunk(
+    handle: &mut fs::File,
+    plain_size: u64,
+    key: &FileKey,
+) -> Result<Option<Decryption>> {
+    let mut chunk = vec![0; plain_chunk_len(plain_size, 0) + TAG_BYTES];
+    handle
+        .read_exact(&mut chunk)
+        .await
+        .context("encrypted file is shorter than its first chunk")?;
+    let cipher = ChunkCipher::new(key);
+    if cipher
+        .open(0, chunk_count(plain_size) == 1, &mut chunk)
+        .is_err()
+    {
+        return Ok(None);
+    }
+    Ok(Some(Decryption {
+        cipher,
+        first_chunk: chunk,
+    }))
+}
+
+/// Encrypts the plaintext in chunks of `PLAIN_CHUNK_BYTES` as it arrives. A chunk is only
+/// sealed once it is known whether it is the last, which the declared length tells.
+struct ChunkWriter<'a> {
+    cipher: &'a ChunkCipher,
+    buffer: Vec<u8>,
+    index: u64,
+    last_index: u64,
+}
+
+impl ChunkWriter<'_> {
+    async fn push(&mut self, file: &mut fs::File, mut data: &[u8]) -> Result<(), FileError> {
+        while !data.is_empty() {
+            if self.buffer.len() == PLAIN_CHUNK_BYTES {
+                if self.index == self.last_index {
+                    // More data than the declared length announced.
+                    return Err(FileError::LengthMismatch);
+                }
+                self.seal_and_write(file, false).await?;
+            }
+            let room = PLAIN_CHUNK_BYTES - self.buffer.len();
+            let (now, rest) = data.split_at(room.min(data.len()));
+            self.buffer.extend_from_slice(now);
+            data = rest;
+        }
+        Ok(())
+    }
+
+    async fn seal_and_write(&mut self, file: &mut fs::File, last: bool) -> Result<(), FileError> {
+        self.cipher.seal(self.index, last, &mut self.buffer)?;
+        file.write_all(&self.buffer).await?;
+        self.buffer.clear();
+        self.index += 1;
+        Ok(())
+    }
+
+    async fn finish(mut self, file: &mut fs::File) -> Result<(), FileError> {
+        if self.index != self.last_index {
+            return Err(FileError::LengthMismatch);
+        }
+        self.seal_and_write(file, true).await
+    }
+}
+
+async fn write_body<S, E>(
+    path: &Path,
+    length: u64,
+    body: &mut S,
+    cipher: Option<&ChunkCipher>,
+) -> Result<(), FileError>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Display,
@@ -455,6 +642,12 @@ where
         .await
         .with_context(|| format!("cannot create {}", path.display()))?;
 
+    let mut writer = cipher.map(|cipher| ChunkWriter {
+        cipher,
+        buffer: Vec::with_capacity(PLAIN_CHUNK_BYTES + TAG_BYTES),
+        index: 0,
+        last_index: chunk_count(length) - 1,
+    });
     let mut written: u64 = 0;
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|e| FileError::Internal(anyhow!("upload interrupted: {e}")))?;
@@ -462,10 +655,16 @@ where
         if written > length {
             return Err(FileError::LengthMismatch);
         }
-        file.write_all(&chunk).await?;
+        match writer.as_mut() {
+            Some(writer) => writer.push(&mut file, &chunk).await?,
+            None => file.write_all(&chunk).await?,
+        }
     }
     if written != length {
         return Err(FileError::LengthMismatch);
+    }
+    if let Some(writer) = writer {
+        writer.finish(&mut file).await?;
     }
     file.sync_all().await?;
     Ok(())

@@ -7,8 +7,9 @@ use serde_json::json;
 
 use crate::{ALLOWED_CONTENT_TYPES, CONTENT_CSP};
 use crate::{
+    crypto::{ChunkCipher, FileKey, TAG_BYTES, chunk_count, plain_chunk_len},
     data_mgt::{AppState, Asset},
-    files::Download,
+    files::{Decryption, Download, KeyCheck},
     logs::LogEventType,
 };
 
@@ -300,15 +301,98 @@ async fn api_file_info(
             "valid_from": file.valid_from,
             "available": file.is_available(now),
             "downloads_left": file.downloads_left(),
+            "encrypted": file.is_encrypted(),
         })))
+}
+
+/// The key of an encrypted file, sent in a form body so it never appears in a URL, a
+/// browser history or an access log.
+#[derive(Deserialize)]
+struct FileKeyForm {
+    key: String,
+}
+
+fn parse_file_id(raw: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(raw).ok()
+}
+
+fn invalid_key_response() -> HttpResponse {
+    HttpResponse::BadRequest()
+        .json(json!({ "error": "The key is not valid: it is 43 characters long" }))
+}
+
+/// Tells whether a key opens an encrypted file, without counting a download.
+#[post("/api/files/{id}/check")]
+async fn api_file_check_key(
+    path: web::Path<String>,
+    form: web::Form<FileKeyForm>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let Some(id) = parse_file_id(&path.into_inner()) else {
+        return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
+    };
+    let Some(key) = FileKey::decode(&form.key) else {
+        return Ok(invalid_key_response());
+    };
+    let check = app_state.files.check_key(&id, &key).await.map_err(|e| {
+        eprintln!("Cannot check the key of {id}: {e:#}");
+        actix_web::error::ErrorInternalServerError("Cannot read the file")
+    })?;
+    Ok(match check {
+        KeyCheck::Valid => HttpResponse::NoContent().finish(),
+        KeyCheck::WrongKey => wrong_key_response(),
+        KeyCheck::NotEncrypted => {
+            HttpResponse::BadRequest().json(json!({ "error": "This file is not encrypted" }))
+        }
+        KeyCheck::NotFound => file_not_found_response(),
+        KeyCheck::NotYetAvailable { valid_from } => not_yet_available_response(valid_from),
+    })
+}
+
+/// Download of an encrypted file: the key comes in the form body, and the file is
+/// decrypted while it is sent.
+#[post("/api/files/{id}")]
+async fn api_file_download_with_key(
+    req: HttpRequest,
+    path: web::Path<String>,
+    form: web::Form<FileKeyForm>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let Some(key) = FileKey::decode(&form.key) else {
+        return Ok(invalid_key_response());
+    };
+    serve_download(req, &path.into_inner(), Some(&key), app_state).await
+}
+
+fn file_not_found_response() -> HttpResponse {
+    HttpResponse::NotFound().json(json!({ "error": "File not found" }))
+}
+
+fn not_yet_available_response(valid_from: i64) -> HttpResponse {
+    HttpResponse::Forbidden()
+        .json(json!({ "error": "File not available yet", "valid_from": valid_from }))
+}
+
+fn wrong_key_response() -> HttpResponse {
+    HttpResponse::Forbidden().json(json!({ "error": "Wrong key" }))
 }
 
 /// Sends the whole file as an attachment. Range requests are not supported on purpose:
 /// every GET is one counted download, so a download limit cannot be bypassed in pieces.
+/// An encrypted file is refused here: its key must come through the POST route.
 #[get("/api/files/{id}")]
 async fn api_file_download(
     req: HttpRequest,
     path: web::Path<String>,
+    app_state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    serve_download(req, &path.into_inner(), None, app_state).await
+}
+
+async fn serve_download(
+    req: HttpRequest,
+    raw_id: &str,
+    key: Option<&FileKey>,
     app_state: web::Data<AppState>,
 ) -> Result<HttpResponse, actix_web::Error> {
     app_state
@@ -317,22 +401,34 @@ async fn api_file_download(
         .await
         .unwrap_or_else(|e| println!("Failed to log HTTP request: {}", e));
 
-    let Ok(id) = uuid::Uuid::parse_str(&path.into_inner()) else {
+    let Some(id) = parse_file_id(raw_id) else {
         return Ok(HttpResponse::BadRequest().json(json!({ "error": "Invalid file id" })));
     };
-    let download = app_state.files.start_download(&id).await.map_err(|e| {
-        eprintln!("Cannot start download of {id}: {e:#}");
-        actix_web::error::ErrorInternalServerError("Cannot read the file")
-    })?;
-    let (file, handle) = match download {
-        Download::NotFound => {
-            return Ok(HttpResponse::NotFound().json(json!({ "error": "File not found" })));
-        }
+    let download = app_state
+        .files
+        .start_download(&id, key)
+        .await
+        .map_err(|e| {
+            eprintln!("Cannot start download of {id}: {e:#}");
+            actix_web::error::ErrorInternalServerError("Cannot read the file")
+        })?;
+    let (file, handle, decryption) = match download {
+        Download::NotFound => return Ok(file_not_found_response()),
         Download::NotYetAvailable { valid_from } => {
-            return Ok(HttpResponse::Forbidden()
-                .json(json!({ "error": "File not available yet", "valid_from": valid_from })));
+            return Ok(not_yet_available_response(valid_from));
         }
-        Download::Ready { file, handle } => (file, handle),
+        Download::KeyRequired => {
+            return Ok(HttpResponse::Forbidden().json(json!({
+                "error": "This file is encrypted: open its link and enter the key",
+                "encrypted": true,
+            })));
+        }
+        Download::WrongKey => return Ok(wrong_key_response()),
+        Download::Ready {
+            file,
+            handle,
+            decryption,
+        } => (file, handle, decryption),
     };
 
     let event = json!({
@@ -341,6 +437,7 @@ async fn api_file_download(
         "name": file.name,
         "downloads": file.downloads,
         "max_downloads": file.max_downloads,
+        "encrypted": file.is_encrypted(),
         "ip": crate::client_ip(&req).unwrap_or_else(|| "-".to_string()),
     });
     app_state
@@ -349,13 +446,17 @@ async fn api_file_download(
         .await
         .unwrap_or_else(|e| println!("Failed to log file download: {}", e));
 
-    Ok(HttpResponse::Ok()
+    let mut response = HttpResponse::Ok();
+    response
         .content_type(mime::APPLICATION_OCTET_STREAM)
         .insert_header(attachment_header(&file.name))
         .insert_header((header::CACHE_CONTROL, "no-store"))
         .insert_header(("Content-Security-Policy", CONTENT_CSP))
-        .no_chunking(file.size)
-        .streaming(file_chunks(handle)))
+        .no_chunking(file.size);
+    Ok(match decryption {
+        Some(decryption) => response.streaming(decrypted_chunks(handle, file.size, decryption)),
+        None => response.streaming(file_chunks(handle).boxed_local()),
+    })
 }
 
 /// `attachment` with an ASCII fallback name plus the exact UTF-8 name (RFC 6266), so every
@@ -385,7 +486,7 @@ const DOWNLOAD_CHUNK_BYTES: usize = 64 * 1024;
 /// Reads the file in chunks. After a read error the stream ends, which aborts the response.
 fn file_chunks(
     file: tokio::fs::File,
-) -> impl futures::Stream<Item = Result<web::Bytes, std::io::Error>> {
+) -> impl futures::Stream<Item = Result<web::Bytes, std::io::Error>> + 'static {
     futures::stream::unfold(Some(file), |file| async move {
         let mut file = file?;
         let mut buffer = vec![0; DOWNLOAD_CHUNK_BYTES];
@@ -398,4 +499,60 @@ fn file_chunks(
             Err(e) => Some((Err(e), None)),
         }
     })
+}
+
+struct DecryptState {
+    file: tokio::fs::File,
+    cipher: ChunkCipher,
+    plain_size: u64,
+    /// Index of the next chunk to read from disk.
+    next: u64,
+    first_chunk: Option<Vec<u8>>,
+}
+
+/// Decrypts an encrypted file chunk by chunk, starting with the first chunk that was
+/// decrypted to check the key. A chunk that fails to decrypt (the file was changed on disk)
+/// ends the stream with an error, which aborts the response: the downloader never gets a
+/// silently corrupted file.
+fn decrypted_chunks(
+    file: tokio::fs::File,
+    plain_size: u64,
+    decryption: Box<Decryption>,
+) -> futures::stream::LocalBoxStream<'static, Result<web::Bytes, std::io::Error>> {
+    let state = DecryptState {
+        file,
+        cipher: decryption.cipher,
+        plain_size,
+        next: 1,
+        first_chunk: Some(decryption.first_chunk),
+    };
+    futures::stream::unfold(Some(state), |state| async move {
+        let mut state = state?;
+        if let Some(first) = state.first_chunk.take() {
+            return Some((Ok(web::Bytes::from(first)), Some(state)));
+        }
+        let count = chunk_count(state.plain_size);
+        if state.next >= count {
+            return None;
+        }
+        let index = state.next;
+        let mut chunk = vec![0; plain_chunk_len(state.plain_size, index) + TAG_BYTES];
+        if let Err(e) = tokio::io::AsyncReadExt::read_exact(&mut state.file, &mut chunk).await {
+            return Some((Err(e), None));
+        }
+        if state
+            .cipher
+            .open(index, index + 1 == count, &mut chunk)
+            .is_err()
+        {
+            eprintln!("Chunk {index} of an encrypted file does not decrypt: the file is damaged");
+            return Some((
+                Err(std::io::Error::other("encrypted file is damaged")),
+                None,
+            ));
+        }
+        state.next += 1;
+        Some((Ok(web::Bytes::from(chunk)), Some(state)))
+    })
+    .boxed_local()
 }

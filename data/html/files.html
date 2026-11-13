@@ -74,10 +74,24 @@
             <div class="input-wrap"><input id="fileValidFrom" type="datetime-local" /></div>
             <div class="field-help">Empty: right away</div>
           </div>
+          <div class="field wide" id="field-file-encrypt">
+            <span class="field-label">Encryption</span>
+            <label class="toggle"><input id="fileEncrypt" type="checkbox" /> Encrypt with a new random key</label>
+            <div class="field-help">The downloader needs the key: send it separately from the link. You can show it again with your password.</div>
+          </div>
         </div>
         <div class="upload-progress" id="uploadProgress" hidden>
           <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
           <div class="progress-text" id="progressText"></div>
+        </div>
+        <div class="share-result" id="shareResult" hidden>
+          <div class="share-result-head">
+            <strong id="shareResultTitle"></strong>
+            <button class="btn-ghost" type="button" id="shareResultClose">Close</button>
+          </div>
+          <div class="share-result-rows" id="shareResultRows"></div>
+          <p class="share-result-note" id="shareResultNote" hidden>Send the key separately from the link, for example
+            through another app. You can show it again from the list with your password.</p>
         </div>
         <div class="settings-foot">
           <p class="message" id="fileMessage"></p>
@@ -102,6 +116,29 @@
       </section>
     </div>
   </main>
+
+  <dialog id="keyDialog" class="key-dialog">
+    <form id="keyDialogForm" method="dialog" novalidate>
+      <div class="settings-head">
+        <div>
+          <h2>Show file key</h2>
+          <p id="keyDialogFile"></p>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field-label" for="keyDialogPassword">Admin password</label>
+        <div class="input-wrap"><input id="keyDialogPassword" type="password" autocomplete="current-password" /></div>
+        <div class="field-help">It decrypts the stored key; it is not saved anywhere.</div>
+      </div>
+      <div class="settings-foot">
+        <p class="message" id="keyDialogMessage"></p>
+        <div class="settings-actions">
+          <button class="btn-ghost" type="button" id="keyDialogCancel">Cancel</button>
+          <button class="btn-primary" type="submit" id="keyDialogSubmit">Show key</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
 
   {{FOOTER}}
 
@@ -128,15 +165,143 @@
       return `${location.origin}${item.link}`;
     }
 
-    async function copyLink(url) {
-      try {
-        await navigator.clipboard.writeText(url);
-        setMessage("filesMessage", "Link copied.", "ok");
-      } catch {
-        // The clipboard API needs HTTPS or localhost; let the admin copy it by hand.
-        window.prompt("Copy the link:", url);
-      }
+    // A button that copies `text` and says so on itself for a moment.
+    function copyButton(text, label) {
+      const button = el("button", { className: "btn-ghost", type: "button" }, label);
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          button.textContent = "Copied";
+          setTimeout(() => {
+            button.textContent = label;
+          }, 1500);
+        } catch {
+          // The clipboard API needs HTTPS or localhost; let the admin copy it by hand.
+          window.prompt("Copy:", text);
+        }
+      });
+      return button;
     }
+
+    // One labelled value on its own line, wrapping when long. A secret starts hidden behind
+    // dots (as many as its characters, so showing it does not move anything).
+    function secretRow(label, value, { secret = false, shown = !secret } = {}) {
+      const code = el("code", { className: "secret-value" });
+      const buttons = [];
+      if (secret) {
+        const toggle = el("button", { className: "btn-ghost", type: "button" });
+        const update = () => {
+          code.textContent = shown ? value : "•".repeat(value.length);
+          toggle.textContent = shown ? "Hide" : "Show";
+        };
+        toggle.addEventListener("click", () => {
+          shown = !shown;
+          update();
+        });
+        update();
+        buttons.push(toggle);
+      } else {
+        code.textContent = value;
+      }
+      buttons.push(copyButton(value, "Copy"));
+      return el(
+        "div",
+        { className: "secret-row" },
+        el("span", { className: "secret-label" }, label),
+        code,
+        el("div", { className: "secret-actions" }, ...buttons)
+      );
+    }
+
+    function showShareResult(item) {
+      document.getElementById("shareResultTitle").textContent = `Shared "${item.name}"`;
+      const rows = [secretRow("Link", fileLink(item))];
+      if (item.key) rows.push(secretRow("Key", item.key, { secret: true }));
+      document.getElementById("shareResultRows").replaceChildren(...rows);
+      document.getElementById("shareResultNote").hidden = !item.key;
+      document.getElementById("shareResult").hidden = false;
+    }
+
+    function hideShareResult() {
+      document.getElementById("shareResult").hidden = true;
+      document.getElementById("shareResultRows").replaceChildren();
+    }
+
+    document.getElementById("shareResultClose").addEventListener("click", hideShareResult);
+
+    // Keys known to this page, by file id. Only in memory: a reload forgets them.
+    const revealedKeys = new Map();
+    // Files whose key row is open in the list.
+    const openKeys = new Set();
+    // The list as last loaded, to redraw it when a key row opens or closes.
+    let lastFiles = [];
+
+    function toggleKeyRow(item) {
+      if (openKeys.has(item.id)) {
+        openKeys.delete(item.id);
+      } else if (revealedKeys.has(item.id)) {
+        openKeys.add(item.id);
+      } else {
+        openKeyDialog(item);
+        return;
+      }
+      renderFiles(lastFiles);
+    }
+
+    // ------------------------------------------------------------------ key dialog
+
+    const keyDialog = document.getElementById("keyDialog");
+    let keyDialogItem = null;
+
+    function openKeyDialog(item) {
+      keyDialogItem = item;
+      document.getElementById("keyDialogFile").textContent = item.name;
+      document.getElementById("keyDialogPassword").value = "";
+      setMessage("keyDialogMessage", "");
+      keyDialog.showModal();
+      document.getElementById("keyDialogPassword").focus();
+    }
+
+    function closeKeyDialog() {
+      // The password must not stay in the page.
+      document.getElementById("keyDialogPassword").value = "";
+      keyDialogItem = null;
+      keyDialog.close();
+    }
+
+    document.getElementById("keyDialogCancel").addEventListener("click", closeKeyDialog);
+    keyDialog.addEventListener("cancel", () => {
+      document.getElementById("keyDialogPassword").value = "";
+    });
+    document.getElementById("keyDialogForm").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const item = keyDialogItem;
+      const password = document.getElementById("keyDialogPassword").value;
+      if (!item) return;
+      if (!password) {
+        setMessage("keyDialogMessage", "Enter your password.");
+        return;
+      }
+      const submit = document.getElementById("keyDialogSubmit");
+      submit.disabled = true;
+      setMessage("keyDialogMessage", "Checking...", "ok");
+      const result = await api(`/files/${encodeURIComponent(item.id)}/key`, {
+        method: "POST",
+        body: { password },
+      });
+      submit.disabled = false;
+      if (result.response.ok && result.data) {
+        revealedKeys.set(item.id, result.data.key);
+        openKeys.add(item.id);
+        closeKeyDialog();
+        renderFiles(lastFiles);
+      } else if (result.response.status === 401) {
+        closeKeyDialog();
+        showLoginPrompt();
+      } else {
+        setMessage("keyDialogMessage", errorText(result, "Cannot show the key"));
+      }
+    });
 
     function renderFileLimits(stats) {
       const perFile = settings ? `up to ${formatBytes(settings.max_file_size_bytes)} per file, ` : "";
@@ -163,10 +328,10 @@
     }
 
     function renderFiles(files) {
+      lastFiles = files;
       const now = Date.now();
-      const rows = files.map((item) => {
-        const copyBtn = el("button", { className: "btn-ghost", type: "button" }, "Copy link");
-        copyBtn.addEventListener("click", () => copyLink(fileLink(item)));
+      const rows = files.flatMap((item) => {
+        const copyBtn = copyButton(fileLink(item), "Copy link");
         const deleteBtn = el("button", { className: "btn-ghost danger", type: "button" }, "Delete");
         deleteBtn.addEventListener("click", () => deleteFile(item));
         const waiting = item.valid_from !== null && now < item.valid_from;
@@ -174,7 +339,13 @@
           ? `Opens in ${formatDuration(item.valid_from - now)}`
           : `Expires in ${formatDuration(item.expires_at - now)}`;
         const downloads = `${item.downloads} / ${item.max_downloads === null ? "∞" : item.max_downloads}`;
-        return el(
+        const keyOpen = item.encrypted && openKeys.has(item.id) && revealedKeys.has(item.id);
+        let keyCell = "—";
+        if (item.encrypted) {
+          keyCell = el("button", { className: "btn-ghost", type: "button" }, keyOpen ? "Hide key" : "Show key");
+          keyCell.addEventListener("click", () => toggleKeyRow(item));
+        }
+        const row = el(
           "tr",
           {},
           el("td", { className: "name", title: item.name },
@@ -182,13 +353,22 @@
           el("td", {}, formatBytes(item.size)),
           el("td", {}, downloads),
           el("td", {}, status),
+          el("td", {}, keyCell),
           el("td", {}, el("div", { className: "row-actions" }, copyBtn, deleteBtn))
         );
+        if (!keyOpen) return [row];
+        // The key gets a full-width line under its file, so the table keeps its width.
+        const keyRow = el(
+          "tr",
+          { className: "key-row" },
+          el("td", { colSpan: 6 }, secretRow("Key", revealedKeys.get(item.id), { secret: true, shown: true }))
+        );
+        return [row, keyRow];
       });
       document.getElementById("filesSummary").textContent =
         files.length === 0 ? "No file is shared right now." : `${files.length} file(s) with a valid link.`;
       document.getElementById("filesTable").replaceChildren(
-        table(["Name", "Size", "Downloads", "Status", ""], rows)
+        table(["Name", "Size", "Downloads", "Status", "Key", ""], rows)
       );
     }
 
@@ -219,7 +399,7 @@
       document.getElementById("fileUploadBtn").disabled = active || !selectedFile;
       document.getElementById("fileCancel").disabled = !active;
       document.getElementById("uploadProgress").hidden = !active;
-      for (const id of ["fileInput", "fileName", "fileDuration", "fileDurationUnit", "fileMaxDownloads", "fileValidFrom"]) {
+      for (const id of ["fileInput", "fileName", "fileDuration", "fileDurationUnit", "fileMaxDownloads", "fileValidFrom", "fileEncrypt"]) {
         document.getElementById(id).disabled = active;
       }
     }
@@ -245,6 +425,7 @@
         if (Number.isNaN(from)) return { error: "The opening time is not valid." };
         query.set("valid_from", String(from));
       }
+      if (document.getElementById("fileEncrypt").checked) query.set("encrypt", "true");
       return { query };
     }
 
@@ -289,11 +470,8 @@
         if (request.status === 201 && data) {
           document.getElementById("fileForm").reset();
           selectFile(null);
-          const copyBtn = el("button", { className: "btn-ghost", type: "button" }, "Copy link");
-          copyBtn.addEventListener("click", () => copyLink(fileLink(data)));
-          const message = document.getElementById("fileMessage");
-          message.className = "message ok";
-          message.replaceChildren(`Uploaded "${data.name}". `, copyBtn);
+          if (data.key) revealedKeys.set(data.id, data.key);
+          showShareResult(data);
           await loadPage();
         } else if (request.status === 0) {
           setMessage("fileMessage", "Upload cancelled or connection lost.");
@@ -305,6 +483,7 @@
       document.getElementById("progressBar").style.width = "0";
       document.getElementById("progressText").textContent = "Starting...";
       setMessage("fileMessage", "");
+      hideShareResult();
       setUploading(true);
       request.open("POST", `/api/admin/files?${form.query}`);
       request.send(selectedFile);

@@ -20,7 +20,8 @@ use crate::{
     auth::{CredentialStore, load_or_create_session_key},
     configure_routes,
     data_mgt::{AppState, Asset, AssetStorage, RateLimiter},
-    files::{FileError, FileStore, NewFile, clean_file_name},
+    crypto::{FileKey, encrypted_size},
+    files::{FileEncryption, FileError, FileStore, NewFile, clean_file_name},
     logs::{LogEventType, LogFile, LogLimits},
     resolve_client_ip, security_headers,
     settings::{Settings, SettingsStore},
@@ -1035,12 +1036,12 @@ async fn failed_upload_leaves_no_partial_file_and_frees_the_space() {
     let short: &[&'static [u8]] = &[b"short"];
     let long: &[&'static [u8]] = &[b"too", b" long"];
     for (length, parts) in [(10, short), (3, long)] {
-        let result = store.add(new_file("x"), length, chunks(parts), &settings).await;
+        let result = store.add(new_file("x"), length, chunks(parts), &settings, None).await;
         assert!(matches!(result, Err(FileError::LengthMismatch)), "{result:?}");
         assert!(storage_names(&dir).is_empty(), "{:?}", storage_names(&dir));
     }
     // The space reserved by the failed uploads was given back.
-    let file = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &settings).await.unwrap();
+    let file = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &settings, None).await.unwrap();
     assert_eq!(file.size, 10);
 }
 
@@ -1048,8 +1049,8 @@ async fn failed_upload_leaves_no_partial_file_and_frees_the_space() {
 async fn files_survive_a_restart_and_storage_is_reconciled() {
     let dir = temp_dir();
     let store = FileStore::load(&dir).await.unwrap();
-    let kept = store.add(new_file("keep.txt"), 4, chunks(&[b"keep"]), &defaults()).await.unwrap();
-    let lost = store.add(new_file("lost.txt"), 4, chunks(&[b"lost"]), &defaults()).await.unwrap();
+    let kept = store.add(new_file("keep.txt"), 4, chunks(&[b"keep"]), &defaults(), None).await.unwrap();
+    let lost = store.add(new_file("lost.txt"), 4, chunks(&[b"lost"]), &defaults(), None).await.unwrap();
 
     fs::remove_file(dir.join(lost.id.to_string())).unwrap();
     let orphan = uuid::Uuid::new_v4();
@@ -1071,7 +1072,7 @@ async fn files_survive_a_restart_and_storage_is_reconciled() {
 async fn expired_files_are_deleted_from_disk() {
     let dir = temp_dir();
     let store = FileStore::load(&dir).await.unwrap();
-    let file = store.add(new_file("old.txt"), 3, chunks(&[b"old"]), &defaults()).await.unwrap();
+    let file = store.add(new_file("old.txt"), 3, chunks(&[b"old"]), &defaults(), None).await.unwrap();
     assert!(store.remove_expired().await.unwrap().is_empty());
 
     // Rewrite the index with an expiry in the past, as if time had passed.
@@ -1116,4 +1117,222 @@ async fn file_names_keep_only_the_last_path_component() {
     for bad in ["", "dir/", "..", "a\nb", &"x".repeat(256)] {
         assert_eq!(clean_file_name(bad), None, "{bad:?}");
     }
+}
+
+// ---------------------------------------------------------------- encrypted files
+
+/// A body over several encryption chunks, with a short last chunk.
+fn multi_chunk_body() -> &'static [u8] {
+    let body: Vec<u8> = (0..3 * 64 * 1024 + 5).map(|i| (i % 253) as u8).collect();
+    Box::leak(body.into_boxed_slice())
+}
+
+fn key_form(uri: &str, key: &str) -> TestRequest {
+    TestRequest::post()
+        .uri(uri)
+        .set_form([("key", key)])
+}
+
+macro_rules! upload_encrypted {
+    ($app:expr, $cookie:expr, $body:expr) => {{
+        let request = file_upload($cookie, "name=secret.bin&duration_minutes=5&encrypt=true", $body);
+        let response = test::call_service($app, request.to_request()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: Value = test::read_body_json(response).await;
+        let id = created["id"].as_str().unwrap().to_string();
+        let key = created["key"].as_str().unwrap().to_string();
+        (created, id, key)
+    }};
+}
+
+#[actix_web::test]
+async fn encrypted_file_downloads_only_with_its_key() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let body = multi_chunk_body();
+    let (created, id, key) = upload_encrypted!(&app, &cookie, body);
+    assert_eq!(created["encrypted"], true);
+    assert_eq!(created["size"], body.len());
+    assert_eq!(key.len(), 43);
+    assert!(created.get("wrapped_key").is_none());
+
+    // On disk: ciphertext with one tag per chunk, never the plaintext.
+    let stored = fs::read(dir.join("storage").join(&id)).unwrap();
+    assert_eq!(stored.len() as u64, encrypted_size(body.len() as u64));
+    assert!(!stored.windows(64).any(|w| w == &body[..64]));
+    let index = fs::read_to_string(dir.join("storage/index.json")).unwrap();
+    assert!(!index.contains(&key));
+
+    let info: Value = test::call_and_read_body_json(
+        &app,
+        TestRequest::get().uri(&format!("/api/files/{id}/info")).to_request(),
+    )
+    .await;
+    assert_eq!(info["encrypted"], true);
+
+    // The plain GET route refuses it.
+    let response = test::call_service(&app, TestRequest::get().uri(&format!("/api/files/{id}")).to_request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let wrong = FileKey::generate().unwrap().encode();
+    let check = format!("/api/files/{id}/check");
+    let response = test::call_service(&app, key_form(&check, &wrong).to_request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let response = test::call_service(&app, key_form(&check, "not a key").to_request()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = test::call_service(&app, key_form(&check, &key).to_request()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let download = format!("/api/files/{id}");
+    let response = test::call_service(&app, key_form(&download, &wrong).to_request()).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // Checks and wrong keys are not downloads.
+    let list: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/files", &cookie).to_request()).await;
+    assert_eq!(list[0]["downloads"], 0);
+    assert_eq!(list[0]["encrypted"], true);
+    assert!(list[0].get("key").is_none());
+
+    let response = test::call_service(&app, key_form(&download, &format!(" {key}\n")).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(headers.get(header::CONTENT_LENGTH).unwrap(), &body.len().to_string());
+    let disposition = headers.get(header::CONTENT_DISPOSITION).unwrap().to_str().unwrap();
+    assert!(disposition.contains(r#"filename="secret.bin""#), "{disposition}");
+    assert_eq!(test::read_body(response).await.as_ref(), body);
+
+    let list: Value =
+        test::call_and_read_body_json(&app, admin_get("/api/admin/files", &cookie).to_request()).await;
+    assert_eq!(list[0]["downloads"], 1);
+}
+
+#[actix_web::test]
+async fn damaged_encrypted_file_aborts_the_download() {
+    let dir = temp_dir();
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_setup!(&app);
+    let (_, id, key) = upload_encrypted!(&app, &cookie, multi_chunk_body());
+
+    // Flip one byte in the third chunk: the first chunk still checks the key.
+    let path = dir.join("storage").join(&id);
+    let mut stored = fs::read(&path).unwrap();
+    stored[2 * (64 * 1024 + 16) + 10] ^= 1;
+    fs::write(&path, stored).unwrap();
+
+    let response = test::call_service(&app, key_form(&format!("/api/files/{id}"), &key).to_request()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(test::try_read_body(response).await.is_err());
+}
+
+#[actix_web::test]
+async fn admin_reveals_a_file_key_only_with_the_password() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let (_, id, key) = upload_encrypted!(&app, &cookie, b"top secret");
+    let reveal = |password: &str| {
+        admin_post(&format!("/api/admin/files/{id}/key"), json!({ "password": password }))
+            .cookie(cookie.clone())
+            .to_request()
+    };
+
+    let response = test::call_service(&app, reveal("wrong password")).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let revealed: Value = test::call_and_read_body_json(&app, reveal(ADMIN_PASSWORD)).await;
+    assert_eq!(revealed["key"], key);
+
+    // Without a session nothing is revealed, even with the password.
+    let anonymous = admin_post(&format!("/api/admin/files/{id}/key"), json!({ "password": ADMIN_PASSWORD }));
+    let response = test::call_service(&app, anonymous.to_request()).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // A plain file has no key to reveal.
+    let plain = test::call_service(&app, file_upload(&cookie, "name=a.txt&duration_minutes=5", b"a").to_request()).await;
+    let plain: Value = test::read_body_json(plain).await;
+    assert_eq!(plain["encrypted"], false);
+    let request = admin_post(&format!("/api/admin/files/{}/key", plain["id"].as_str().unwrap()), json!({ "password": ADMIN_PASSWORD }))
+        .cookie(cookie.clone());
+    let response = test::call_service(&app, request.to_request()).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[actix_web::test]
+async fn file_keys_survive_a_password_change() {
+    let app = test_app!(test_state().await);
+    let cookie = admin_setup!(&app);
+    let (_, id, key) = upload_encrypted!(&app, &cookie, b"kept across the change");
+
+    let change = admin_post(
+        "/api/admin/password",
+        json!({ "current_password": ADMIN_PASSWORD, "new_password": "a brand new password" }),
+    )
+    .cookie(cookie.clone());
+    let response = test::call_service(&app, change.to_request()).await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let cookie = admin_cookie(&response);
+
+    let reveal = |password: &str| {
+        admin_post(&format!("/api/admin/files/{id}/key"), json!({ "password": password }))
+            .cookie(cookie.clone())
+            .to_request()
+    };
+    let response = test::call_service(&app, reveal(ADMIN_PASSWORD)).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let revealed: Value = test::call_and_read_body_json(&app, reveal("a brand new password")).await;
+    assert_eq!(revealed["key"], key);
+}
+
+#[actix_web::test]
+async fn credentials_without_keys_get_them_at_the_next_login() {
+    let dir = temp_dir();
+    let path = dir.join("admin/credentials.json");
+    let store = CredentialStore::load(path.clone()).await.unwrap();
+    store.setup(ADMIN_USER, ADMIN_PASSWORD).await.unwrap();
+    assert!(store.public_key().await.is_some());
+
+    // A credentials file written before encryption existed.
+    let mut contents: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    contents.as_object_mut().unwrap().remove("keys");
+    fs::write(&path, serde_json::to_vec(&contents).unwrap()).unwrap();
+
+    let app = test_app!(state_in(&dir).await);
+    let cookie = admin_login!(&app, ADMIN_PASSWORD);
+    let (_, id, key) = upload_encrypted!(&app, &cookie, b"after migration");
+    let response = test::call_service(&app, key_form(&format!("/api/files/{id}"), &key).to_request()).await;
+    assert_eq!(test::read_body(response).await.as_ref(), b"after migration");
+
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(contents.contains("encrypted_private_key"));
+    assert!(!contents.contains(ADMIN_PASSWORD));
+}
+
+#[actix_web::test]
+async fn encrypted_upload_checks_its_length_and_budget_counts_the_tags() {
+    let dir = temp_dir();
+    let store = FileStore::load(&dir).await.unwrap();
+    let pair = crate::crypto::AdminKeyPair::generate("pw for the test").unwrap();
+    let public = pair.public_key().unwrap();
+    fn with_key<'a>(public: &x25519_dalek::PublicKey, key: &'a FileKey) -> Option<FileEncryption<'a>> {
+        Some(FileEncryption { key, wrapped: crate::crypto::wrap_file_key(public, key).unwrap() })
+    }
+    let key = FileKey::generate().unwrap();
+    let encryption = |key| with_key(&public, key);
+
+    let short: &[&'static [u8]] = &[b"short"];
+    let long: &[&'static [u8]] = &[b"too", b" long"];
+    for (length, parts) in [(10, short), (3, long)] {
+        let result = store.add(new_file("x"), length, chunks(parts), &defaults(), encryption(&key)).await;
+        assert!(matches!(result, Err(FileError::LengthMismatch)), "{result:?}");
+        assert!(storage_names(&dir).is_empty(), "{:?}", storage_names(&dir));
+    }
+
+    // 10 plaintext bytes take 26 on disk: a budget of 25 refuses them.
+    let tight = Settings { max_file_size_bytes: 10, max_files_total_bytes: 25, ..defaults() };
+    let result = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &tight, encryption(&key)).await;
+    assert!(matches!(result, Err(FileError::StorageFull)), "{result:?}");
+    let enough = Settings { max_files_total_bytes: 26, ..tight };
+    let file = store.add(new_file("x"), 10, chunks(&[b"0123456789"]), &enough, encryption(&key)).await.unwrap();
+    assert_eq!(file.size, 10);
+    assert_eq!(store.usage().await, (1, 26));
 }

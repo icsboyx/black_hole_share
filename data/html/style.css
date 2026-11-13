@@ -1343,8 +1343,14 @@ td a:hover {
   padding: 10px 22px 18px 22px;
 }
 
+.file-table th,
+.file-table td {
+  padding-left: 6px;
+  padding-right: 6px;
+}
+
 .file-table td.name {
-  max-width: 220px;
+  max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1375,6 +1381,132 @@ td a:hover {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/* ------------------------------------------------------------------ encryption */
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--inactive-gray);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+.toggle:focus-within {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 3px rgba(51, 204, 255, 0.15);
+}
+
+.toggle input {
+  accent-color: var(--accent-cyan);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+
+.share-result {
+  display: grid;
+  gap: 10px;
+  margin: 16px 22px 0 22px;
+  padding: 14px 16px;
+  background-color: rgba(0, 255, 153, 0.04);
+  border: 1px solid rgba(0, 255, 153, 0.35);
+  border-radius: 12px;
+}
+
+.share-result-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--accent-green);
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.share-result-rows {
+  display: grid;
+  gap: 8px;
+}
+
+.share-result-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.75em;
+}
+
+.secret-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.secret-label {
+  color: var(--text-secondary);
+  font-size: 0.7em;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.secret-value {
+  min-width: 0;
+  padding: 7px 10px;
+  background-color: var(--bg-primary);
+  border: 1px solid rgba(89, 89, 89, 0.6);
+  border-radius: 8px;
+  color: var(--accent-green);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8em;
+  overflow-wrap: anywhere;
+}
+
+.secret-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.file-table tr.key-row td {
+  padding-top: 0;
+  padding-bottom: 12px;
+  white-space: normal;
+}
+
+/* The file and its key row read as one entry. */
+.file-table tr:has(+ tr.key-row) td {
+  border-bottom: none;
+}
+
+@media (max-width: 560px) {
+  .secret-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+}
+
+.key-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  background-color: var(--bg-secondary);
+  border: 1px solid rgba(51, 204, 255, 0.35);
+  border-radius: 14px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  color: var(--text-primary);
+}
+
+.key-dialog::backdrop {
+  background-color: rgba(0, 0, 0, 0.6);
+}
+
+.key-dialog .settings-head,
+.key-dialog .field {
+  padding: 18px 22px 0 22px;
 }
 
 [hidden] {

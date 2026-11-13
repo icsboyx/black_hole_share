@@ -271,7 +271,7 @@ Returns the raw content with the stored MIME type and a sandbox `Content-Securit
 
 `GET /api/files/{id}/info`
 
-Public details of a shared file: `name`, `size`, `expires_at`, `valid_from` (or `null`), `available`, and `downloads_left` (or `null` when unlimited). Times are Unix milliseconds. Returns `404` when the file does not exist, has expired, or reached its download limit.
+Public details of a shared file: `name`, `size`, `expires_at`, `valid_from` (or `null`), `available`, `downloads_left` (or `null` when unlimited), and `encrypted`. Times are Unix milliseconds. Returns `404` when the file does not exist, has expired, or reached its download limit.
 
 `GET /api/files/{id}`
 
@@ -280,6 +280,15 @@ Sends the whole file as `application/octet-stream` with `Content-Disposition: at
 - Every request is one counted download. `Range` requests are not supported on purpose: a download limit could otherwise be bypassed by fetching the file in pieces, so an interrupted download restarts from the beginning.
 - When the last allowed download starts, the file is deleted; that download still completes.
 - `403` with `valid_from` before the opening time, `404` as above, `400` for an invalid id.
+- An encrypted file is refused with `403` and `"encrypted": true`: use the POST route below.
+
+`POST /api/files/{id}` with the form body `key=<file key>`
+
+Downloads an encrypted file, decrypted while it is sent; the response is the same as for the GET route. The key goes in the body so it never appears in a URL, a browser history, or an access log. The key is checked on the first chunk before the download is counted: a wrong key gets `403` and does not use up a download; a key that is not 43 base64url characters gets `400`. If the stored file was changed on disk, the decryption fails and the response is cut short instead of delivering a corrupted file.
+
+`POST /api/files/{id}/check` with the form body `key=<file key>`
+
+Checks a key without downloading: `204` when it opens the file, `403` for a wrong key, `400` for a file that is not encrypted or a malformed key, `404` and `403` (opening time) as above. The download page calls it before starting the download.
 
 ### Stats
 
@@ -323,7 +332,7 @@ Open `/admin`. Uploading, viewing, and the public stats stay open to everyone; o
 
 While no admin account exists, `/admin` shows a form that creates it, and the server prints `Admin credentials not set` at startup. **Whoever opens `/admin` first becomes the admin**, so create the account right after the first start, before exposing the service.
 
-There is a single admin account. Its credentials are stored in `data/admin/credentials.json` (username and an Argon2id password hash, file mode `0600`). To reset them, stop the server, delete that file, and start again: the setup form appears again. A credentials file that cannot be read stops startup instead of reopening the setup.
+There is a single admin account. Its credentials are stored in `data/admin/credentials.json` (username, an Argon2id password hash, and the key pair for [encrypted files](#encrypted-files), file mode `0600`). To reset them, stop the server, delete that file, and start again: the setup form appears again. A credentials file that cannot be read stops startup instead of reopening the setup.
 
 ### Sessions
 
@@ -346,9 +355,22 @@ There is a single admin account. Its credentials are stored in `data/admin/crede
 
 - Drag and drop or pick a file, set its name, how long it stays available, an optional download limit, and an optional opening time
 - Upload with progress, speed, and cancel
-- List of shared files with downloads, status, copy link, and delete
+- Optional encryption with a new random key per file; the key is shown once after the upload (hidden behind dots, with Show and Copy) and can be shown again later with the admin password
+- List of shared files with downloads, status, key, copy link, and delete
 - Settings: one section per type (public uploads, files, logs, network, admin session), each saved on its own, with per-field errors, a "Restore defaults" button, and a notice when a restart is needed
 - Password change
+
+### Encrypted files
+
+Encryption is chosen per file at upload time. It happens on the server: the downloader only needs a browser and the key.
+
+- Each file gets its own random 256-bit key. The content is encrypted with AES-256-GCM in 64 KiB chunks while it is uploaded, so neither the upload nor the download holds the file in memory and no plaintext copy is ever written to disk. Each chunk's nonce encodes its position and whether it is the last one, so chunks cannot be reordered, dropped, or appended.
+- The key is returned once, as 43 base64url characters. Send it to the downloader separately from the link; the download page asks for it.
+- So the admin can show the key again, it is also stored in `data/storage/index.json` encrypted for the admin's X25519 public key. The matching private key is kept in `data/admin/credentials.json`, encrypted with a key derived from the admin password (Argon2id). Showing a key needs the password, not only a session.
+- Without the admin password, nothing on disk reveals a file key: a copy of the `data/` volume does not expose encrypted files.
+- Changing the password re-encrypts the private key; keys of files shared before still open. Credentials created before encryption existed get their key pair at the next login.
+- **If the credentials file is deleted** (password reset), stored keys can no longer be shown; downloaders who already have a key can still download.
+- The server sees the content and the key while it encrypts and decrypts. Over plain HTTP the key travels unencrypted on the network: use HTTPS.
 
 ### Admin API
 
@@ -365,8 +387,9 @@ All routes are under `/api/admin`, take and return JSON, and are never cached.
 | `DELETE` | `/assets/{id}` | yes | Delete an asset now; `204`, `400` for an invalid id, `404` if missing |
 | `GET` | `/stats` | yes | Usage, limits, and active uploads per IP |
 | `GET` | `/settings` | yes | `current` (saved), `running` (in use since startup), and `defaults` settings, `restart_fields`, and `restart_pending` |
-| `POST` | `/files?name=&duration_minutes=&max_downloads=&valid_from=` | yes | Raw file bytes as the body, `Content-Length` required (`411` without it). `duration_minutes` counts from `valid_from` (Unix ms) when given. `201` with the file and its `link`; `400` invalid input or a body that does not match its length, `413` over `max_file_size_bytes`, `507` over `max_files_total_bytes` |
-| `GET` | `/files` | yes | Shared files that have not expired, with downloads and `link` |
+| `POST` | `/files?name=&duration_minutes=&max_downloads=&valid_from=&encrypt=` | yes | Raw file bytes as the body, `Content-Length` required (`411` without it). `duration_minutes` counts from `valid_from` (Unix ms) when given. With `encrypt=true` the file is encrypted and the response includes its `key`, returned only here. `201` with the file and its `link`; `400` invalid input or a body that does not match its length, `413` over `max_file_size_bytes`, `507` over `max_files_total_bytes` (encrypted files count 16 bytes more per 64 KiB), `409` when the encryption keys do not exist yet (log in again) |
+| `GET` | `/files` | yes | Shared files that have not expired, with downloads, `encrypted`, and `link` |
+| `POST` | `/files/{id}/key` | yes | `{ "password" }`; `200` with the `key` of an encrypted file, `403` if the password is wrong, `400` if the file is not encrypted, `404` if missing. Logged |
 | `DELETE` | `/files/{id}` | yes | Delete a shared file now; `204`, `400` for an invalid id, `404` if missing |
 | `PUT` | `/settings` | yes | Every setting, all fields required; `400` with `fields: [{ field, message }]` when invalid. Saves and applies them, and returns the same body as `GET` |
 

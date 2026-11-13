@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File sharing limits in the settings: max file size, total disk space, max duration.
 - `/files` page for the admin to share and manage files, linked from the admin bar (Upload · Files · Stats · Admin); the admin panel keeps the management tabs (Overview, Settings, Account).
 - Admin page helpers moved to `admin-common.js` and admin styles to `style.css`, shared by `admin.html` and `files.html`.
+- Optional encryption of shared files: a random 256-bit key per file, AES-256-GCM in 64 KiB chunks while uploading and downloading. The key is shown once after the upload, sent to the downloader separately from the link, and entered on the download page; it travels in a POST body, never in a URL. A wrong key does not use up a download.
+- The admin can show a file key again with their password: keys are stored wrapped for the admin's X25519 key pair, whose private key is encrypted with a key derived from the password. Existing accounts get their key pair at the next login.
+- New dependencies: `aes-gcm`, `x25519-dalek`, `hkdf`, `sha2`, `getrandom`, `zeroize`.
 
 ### Changed
 
